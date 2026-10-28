@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <iterator>
 #include <mutex>
 
 extern "C"
@@ -31,6 +32,7 @@ extern "C"
     int scePadReadState(int handle, void* data);
     int scePadSetVibration(int handle, const void* param);
     int scePadSetVibrationMode(int handle, int mode);
+    int scePadSetTriggerEffect(int handle, const void* param);
 }
 
 namespace ps5::pad
@@ -58,11 +60,82 @@ namespace ps5::pad
             kTouchPad = 0x100000,
         };
 
+        // ScePadTriggerEffectParam, as the public reverse-engineered headers
+        // lay it out (not yet checked on a console): a mask of the triggers
+        // it sets, then one command per trigger, L2 first. A command's data
+        // is a 48-byte union; Feedback's is a start position (0-9, of the
+        // trigger's travel) and a strength (1-8).
+        enum : uint8_t { kTriggerL2 = 0x01, kTriggerR2 = 0x02 };
+        enum : uint32_t { kTriggerEffectOff = 0, kTriggerEffectFeedback = 1 };
+        struct TriggerEffectCommand
+        {
+            uint32_t mode;
+            uint8_t padding[4];
+            union
+            {
+                struct
+                {
+                    uint8_t position, strength;
+                } feedback;
+                uint8_t data[48];
+            };
+        };
+        struct TriggerEffectParam
+        {
+            uint8_t triggerMask;
+            uint8_t padding[7];
+            TriggerEffectCommand command[2];  // L2, R2
+        };
+        static_assert(sizeof(TriggerEffectCommand) == 56, "libScePad trigger effect command ABI");
+        static_assert(sizeof(TriggerEffectParam) == 120, "libScePad trigger effect ABI");
+
+        // Each level's feedback, { position, strength } (strength 0: off):
+        // the brake firmer than the accelerator.
+        struct Feedback
+        {
+            uint8_t position, strength;
+        };
+        struct Level
+        {
+            Feedback accelerator, brake;
+        };
+        constexpr Level kLevels[] = {
+            { { 0, 0 }, { 0, 0 } },  // Off
+            { { 1, 2 }, { 1, 4 } },  // Light
+            { { 1, 3 }, { 1, 6 } },  // Medium
+            { { 1, 5 }, { 1, 8 } },  // Strong
+        };
+
         std::mutex s_mutex;
         int s_handle = -1;
         bool s_ownHandle = false;
         time_t s_nextOpen = 0;
         SDL_JoystickID s_id = 0;
+        int s_triggerLevel = 0;      // what Settings asks for
+        int s_triggerLevelSent = -1;  // what the open pad was sent (-1: nothing yet)
+
+        void SetFeedback(TriggerEffectCommand& c, Feedback f)
+        {
+            c.mode = f.strength ? kTriggerEffectFeedback : kTriggerEffectOff;
+            c.feedback.position = f.position;
+            c.feedback.strength = f.strength;
+        }
+
+        // Sends the level asked for, if the open pad doesn't have it yet.
+        void SendTriggersLocked()
+        {
+            if (s_handle < 0 || s_triggerLevelSent == s_triggerLevel)
+                return;
+            TriggerEffectParam param{};
+            param.triggerMask = kTriggerL2 | kTriggerR2;
+            SetFeedback(param.command[0], kLevels[s_triggerLevel].brake);
+            SetFeedback(param.command[1], kLevels[s_triggerLevel].accelerator);
+            const int result = scePadSetTriggerEffect(s_handle, &param);
+            fprintf(stderr, "[ps5] trigger resistance %d: scePadSetTriggerEffect %s (0x%08x)\n", s_triggerLevel,
+                result >= 0 ? "ok" : "failed", unsigned(result));
+            // A failure isn't retried every frame: the next change or reopen tries again.
+            s_triggerLevelSent = s_triggerLevel;
+        }
 
         // Opens the initial user's pad (or takes the handle the system has).
         bool OpenLocked()
@@ -84,6 +157,8 @@ namespace ps5::pad
                 return false;
             scePadSetVibrationMode(s_handle, 2);
             fprintf(stderr, "[ps5] pad opened (user %d, handle %d)\n", user, s_handle);
+            s_triggerLevelSent = -1;
+            SendTriggersLocked();
             return true;
         }
 
@@ -189,6 +264,16 @@ namespace ps5::pad
         std::lock_guard lock(s_mutex);
         if (s_handle >= 0)
             scePadSetVibration(s_handle, stop);
+        s_triggerLevel = 0;
+        SendTriggersLocked();
         CloseLocked();
+    }
+
+    void SetTriggerResistance(int level)
+    {
+        level = level < 0 ? 0 : level >= int(std::size(kLevels)) ? int(std::size(kLevels)) - 1 : level;
+        std::lock_guard lock(s_mutex);
+        s_triggerLevel = level;
+        SendTriggersLocked();
     }
 }
