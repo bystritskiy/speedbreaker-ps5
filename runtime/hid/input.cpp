@@ -1109,6 +1109,9 @@ namespace hid
     void Shutdown()
     {
         wheel::Shutdown();
+#ifdef __PROSPERO__
+        ps5::pad::SetTriggers(0, false, {});  // free triggers for the next app
+#endif
         if (s_gamepad)
         {
             SDL_RumbleGamepad(s_gamepad, 0, 0, 0);
@@ -1165,6 +1168,10 @@ namespace hid
     {
 #if defined(__APPLE__) && TARGET_OS_IOS
         NoControllerNotice();
+#endif
+#ifdef __PROSPERO__
+        ps5::pad::SetTriggers(settings::GetInt(settings::Id::TriggerResistance), settings::GetBool(settings::Id::TriggerEffects),
+            telemetry::Read());
 #endif
         Pad p;
         float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;

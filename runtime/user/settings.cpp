@@ -103,6 +103,18 @@ namespace settings
         // Screen Resolution scales an iOS view (Core Animation scales it up
         // to the screen); elsewhere the window's size is the player's.
         constexpr bool kPresentScaleHidden = !kFullscreenHidden;
+        // The DualSense's adaptive triggers (Trigger Resistance, Trigger Effects) are set on the PS5 only (port/ps5/src/pad_ps5.cpp).
+#ifdef __PROSPERO__
+        constexpr bool kTriggerResistanceHidden = false;
+#else
+        constexpr bool kTriggerResistanceHidden = true;
+#endif
+        constexpr EnumEntry kTriggerResistanceEntries[] = {
+            { 0, "off", "Off" },
+            { 1, "light", "Light" },
+            { 2, "medium", "Medium" },
+            { 3, "strong", "Strong" },
+        };
 
         // Smooth Motion's description: the screens it draws for (video::HfrOffered).
 #if defined(__APPLE__)
@@ -325,6 +337,14 @@ namespace settings
               .table = "input", .key = "vibration", .label = "Vibration",
               .description = "Controller rumble, and the knocks a steering wheel's force feedback passes on (Settings > Wheel).",
               .env = "NFSMW_VIBRATION", .defaultValue = 1 },
+            { .id = Id::TriggerResistance, .category = Category::Input, .type = Type::Enum, .apply = Apply::Live, .hidden = kTriggerResistanceHidden,
+              .table = "input", .key = "trigger_resistance", .label = "Trigger Resistance",
+              .description = "The DualSense's triggers push back, as in modern driving games: the accelerator lightly, the brake more and more as you press it, like a pedal.",
+              .env = "NFSMW_TRIGGER_RESISTANCE", .defaultValue = 1, .entries = kTriggerResistanceEntries },
+            { .id = Id::TriggerEffects, .category = Category::Input, .type = Type::Bool, .apply = Apply::Live, .hidden = kTriggerResistanceHidden,
+              .table = "input", .key = "trigger_effects", .label = "Trigger Effects",
+              .description = "The triggers follow the car: the brake firmer at speed and knocking like ABS when you brake hard, the accelerator kicking once at each gear change; the controller buzzes at the rev limiter.",
+              .env = "NFSMW_TRIGGER_EFFECTS", .defaultValue = 1 },
             // Wheel (Settings > Wheel; hid/wheel_map.h and hid/wheel.cpp
             // read them). The page shows only while a wheel is connected.
             { .id = Id::Wheel, .category = Category::Wheel, .type = Type::Bool, .apply = Apply::Live,
