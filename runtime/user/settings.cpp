@@ -343,7 +343,7 @@ namespace settings
               .env = "NFSMW_TRIGGER_RESISTANCE", .defaultValue = 1, .entries = kTriggerResistanceEntries },
             { .id = Id::TriggerEffects, .category = Category::Input, .type = Type::Bool, .apply = Apply::Live, .hidden = kTriggerResistanceHidden,
               .table = "input", .key = "trigger_effects", .label = "Trigger Effects",
-              .description = "The accelerator shakes with the game's knocks (crashes, bumps, rough ground), buzzes while nitrous is on, and kicks when you shift gear with the right stick.",
+              .description = "The triggers follow the car: the brake firmer at speed and knocking like ABS when you brake hard, the accelerator kicking once at each gear change; the controller buzzes at the rev limiter.",
               .env = "NFSMW_TRIGGER_EFFECTS", .defaultValue = 1 },
             // Wheel (Settings > Wheel; hid/wheel_map.h and hid/wheel.cpp
             // read them). The page shows only while a wheel is connected.

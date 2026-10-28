@@ -9,6 +9,7 @@
 //   SpeedBreaker --install <image>     and the other commands in install/install_cli.h
 
 #include "stdafx.h"
+#include "debug/mem_scan.h"
 #include "kernel/arena.h"
 #include "kernel/memory_status.h"
 #include "kernel/module.h"
@@ -368,6 +369,7 @@ int main(int argc, char** argv)
     memstatus::Gather(memory);
     fprintf(stderr, "%s\n", memstatus::LogLine(memory).c_str());
     report::SetSystemItem("Memory", memstatus::SummaryItem(memory));
+    memscan::Start();  // debug: only with a scan folder (debug/mem_scan.h)
     if (g_memory.base == nullptr)
     {
         // An iOS copy signed without Extended Virtual Addressing (a free

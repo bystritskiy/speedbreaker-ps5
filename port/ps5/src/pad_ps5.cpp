@@ -11,6 +11,7 @@
 // One player, the initial user's pad, reopened a second after it fails (a
 // pad switched off or reconnected).
 #include "ps5_host.h"
+#include <user/paths.h>
 
 #include <SDL3/SDL.h>
 
@@ -21,6 +22,9 @@
 #include <ctime>
 #include <iterator>
 #include <mutex>
+#include <string>
+
+#include <sys/stat.h>
 
 extern "C"
 {
@@ -103,96 +107,177 @@ namespace ps5::pad
         constexpr Level kLevels[] = {
             { 0, 0, 0 },  // Off
             { 2, 1, 4 },  // Light
-            { 3, 2, 6 },  // Medium
-            { 5, 3, 8 },  // Strong
+            { 3, 2, 5 },  // Medium
+            { 5, 3, 7 },  // Strong
         };
 
-        // Trigger Effects (the dynamic part, on top of the resistance):
-        // - the game's own rumble (crashes, bumps, kerbs, rough ground) above
-        //   kRumbleThreshold shakes the accelerator, as strongly as the game
-        //   rumbles: low notes for the big motor, high ones for the small;
-        // - nitrous (Circle, the 360's B) held with the accelerator down
-        //   buzzes the accelerator harder;
-        // - a gear change (the right stick flicked up or down, the game's
-        //   manual shift) kicks the accelerator once, briefly. Automatic
-        //   shifts aren't seen: the game doesn't tell us.
-        // First guesses, to be tuned on a console: the log's "[ps5] triggers:
-        // game rumble peak" line gives what the game sends.
-        constexpr float kRumbleThreshold = 0.35f;
-        constexpr uint32_t kNitrous = 0x2000;  // kCircle
-        constexpr uint8_t kNitrousAccelerator = 77;  // r2 above 30%
-        // The right stick past this far from the centre (of 128) is a shift,
-        // and back within kShiftRelease ready for the next one.
-        constexpr int kShiftPress = 80, kShiftRelease = 40;
-        constexpr uint32_t kShiftKickMs = 110;
-        // A change is sent at most this often (ms), but a stop or start of
-        // an effect straight away.
+        // Trigger Effects, from the car (game/car_telemetry.h). Tuned by hand
+        // on an iPhone with a DualSense through Apple's GameController, whose
+        // scale is 0-1 for everything; the Hz below are that scale x 255, a
+        // guess at its mapping: tune them on the console (triggers.txt).
+        // - The brake firmer the faster the car goes: 60% of the level at a
+        //   standstill, 100% from kFullBrakeSpeed.
+        // - ABS: braking past half with the car slowing faster than
+        //   kAbsDecel: a full-amplitude, low-frequency vibration on the brake
+        //   (separate knocks, not a buzz).
+        // - A gear change (the game's own gear, so automatic too): one hard
+        //   knock on the accelerator, then the trigger at its hardest for a
+        //   moment.
+        // - The rev limiter with the accelerator past half: the controller's
+        //   motors buzz (Rumble, on top of the game's own), not the trigger.
+        constexpr float kFullBrakeSpeed = 45;  // m/s (160 km/h)
+        constexpr float kAbsDecel = 9;         // m/s^2
+        constexpr float kLimiter = 0.97f;      // of the redline
+        constexpr uint8_t kHalf = 128;         // a trigger past half (of 255)
+        constexpr uint8_t kLimiterLow = 0x30, kLimiterHigh = 0x90;
+        // Changes within an effect are sent at most this often (ms); a
+        // change of mode at once.
         constexpr uint32_t kSendInterval = 50;
+
+        // The knocks' shape: /data/speedbreaker/triggers.txt ("key = value"
+        // lines, read again within a second of a change; FTP it over).
+        //   abs_amp (1-8), abs_freq (Hz)          ABS
+        //   kick_amp (1-8), kick_freq (Hz)        a gear change's knock...
+        //   kick_thump_ms, kick_hold_ms           ...and how long it and the hold after it last
+        // The defaults are the values that felt right on the iPhone: one knock
+        // per gear change (two at 160 ms), ABS knocks that hit the finger.
+        struct Tuning
+        {
+            uint8_t absAmp = 8, absFreq = 13;
+            uint8_t kickAmp = 8, kickFreq = 20;
+            uint32_t kickThumpMs = 80, kickHoldMs = 60;
+        };
+        Tuning s_tuning;
+        Uint64 s_tuningCheck = 0;
+        long long s_tuningStamp = -1;
+
+        void LoadTuning(Uint64 now)
+        {
+            if (now < s_tuningCheck)
+                return;
+            s_tuningCheck = now + 1000;
+            const std::string path = (GetUserPath() / "triggers.txt").string();
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0)
+                return;
+            const long long stamp = (long long)st.st_mtime * 1000 + (long long)st.st_size;
+            if (stamp == s_tuningStamp)
+                return;
+            s_tuningStamp = stamp;
+            FILE* f = fopen(path.c_str(), "r");
+            if (!f)
+                return;
+            Tuning t;
+            char key[64], value[64];
+            auto clamp = [](long v, long lo, long hi) { return v < lo ? lo : v > hi ? hi : v; };
+            while (fscanf(f, " %63[a-z_] = %63s", key, value) == 2)
+            {
+                const std::string k = key;
+                const long v = strtol(value, nullptr, 10);
+                if (k == "abs_amp") t.absAmp = uint8_t(clamp(v, 1, 8));
+                else if (k == "abs_freq") t.absFreq = uint8_t(clamp(v, 1, 255));
+                else if (k == "kick_amp") t.kickAmp = uint8_t(clamp(v, 1, 8));
+                else if (k == "kick_freq") t.kickFreq = uint8_t(clamp(v, 1, 255));
+                else if (k == "kick_thump_ms") t.kickThumpMs = uint32_t(clamp(v, 0, 1000));
+                else if (k == "kick_hold_ms") t.kickHoldMs = uint32_t(clamp(v, 0, 1000));
+            }
+            fclose(f);
+            s_tuning = t;
+            fprintf(stderr, "[ps5] trigger tuning: ABS amp %u, %u Hz; kick amp %u, %u Hz, %u ms, hold %u ms\n", t.absAmp, t.absFreq,
+                t.kickAmp, t.kickFreq, unsigned(t.kickThumpMs), unsigned(t.kickHoldMs));
+        }
 
         std::mutex s_mutex;
         int s_handle = -1;
         bool s_ownHandle = false;
         time_t s_nextOpen = 0;
         SDL_JoystickID s_id = 0;
-        // What Settings asks for, and what the game and the pad say now.
+        // What Settings asks for, and what the car and the pad say now.
         int s_triggerLevel = 0;
         bool s_triggerEffects = false;
+        telemetry::Car s_car;
+        uint8_t s_l2 = 0, s_r2 = 0;
+        int s_lastGear = -1;
+        Uint64 s_kickUntil = 0;  // SDL ticks
+        // The game's last rumble, and whether the rev limiter's buzz is on top.
         uint16_t s_rumbleLow = 0, s_rumbleHigh = 0;
-        uint32_t s_buttons = 0;
-        uint8_t s_r2 = 0;
-        bool s_shiftHeld = false;
-        Uint64 s_shiftKickUntil = 0;  // SDL ticks
+        bool s_limiter = false;
         // What the open pad was sent (sentValid false: nothing yet).
         TriggerEffectParam s_sent{};
         bool s_sentValid = false;
         Uint64 s_sentAt = 0;
-        // The game's strongest rumble in the last 5 s, for the log.
-        uint16_t s_peakLow = 0, s_peakHigh = 0;
-        Uint64 s_peakSince = 0;
 
-        uint8_t Clamp8(int v, int lo, int hi)
+        uint8_t Strength(float v)
         {
-            return uint8_t(v < lo ? lo : v > hi ? hi : v);
+            const int s = int(v + 0.5f);
+            return uint8_t(s < 1 ? 1 : s > 8 ? 8 : s);
         }
 
-        TriggerEffectParam DesiredLocked()
+        TriggerEffectParam DesiredLocked(Uint64 now)
         {
             TriggerEffectParam param{};
             param.triggerMask = kTriggerL2 | kTriggerR2;
             const Level& l = kLevels[s_triggerLevel];
             TriggerEffectCommand& brake = param.command[0];
             TriggerEffectCommand& accel = param.command[1];
+            const telemetry::Car& car = s_car;
+            const bool effects = s_triggerEffects;
             if (l.brakeEnd)
             {
+                float k = 1;
+                if (effects && car.speedValid)
+                    k = 0.6f + 0.4f * (car.speed < kFullBrakeSpeed ? car.speed / kFullBrakeSpeed : 1.0f);
                 brake.mode = kTriggerEffectSlopeFeedback;
-                brake.slope = { 1, 9, l.brakeStart, l.brakeEnd };
+                brake.slope = { 1, 9, Strength(l.brakeStart * k), Strength(l.brakeEnd * k) };
             }
             if (l.accelerator)
             {
                 accel.mode = kTriggerEffectFeedback;
                 accel.feedback = { 1, l.accelerator };
             }
-            if (!s_triggerEffects)
+            s_limiter = false;
+            if (!effects)
+            {
+                s_lastGear = -1;
                 return param;
-            const float low = s_rumbleLow / 65535.0f, high = s_rumbleHigh / 65535.0f;
-            const float rumble = low > high ? low : high;
-            if (SDL_GetTicks() < s_shiftKickUntil)
-            {
-                // A short hard jolt, low in the trigger's travel, as the gear goes in.
-                accel.mode = kTriggerEffectVibration;
-                accel.vibration = { 0, 8, 30 };
             }
-            else if ((s_buttons & kNitrous) && s_r2 > kNitrousAccelerator)
+            if (car.speedValid && car.decel > kAbsDecel && s_l2 > kHalf && car.speed > 3)
+            {
+                brake.mode = kTriggerEffectVibration;
+                brake.vibration = { 0, s_tuning.absAmp, s_tuning.absFreq };
+            }
+            if (car.engineValid)
+            {
+                if (s_lastGear >= 0 && car.gear != s_lastGear)
+                    s_kickUntil = now + s_tuning.kickThumpMs + s_tuning.kickHoldMs;
+                s_lastGear = car.gear;
+            }
+            else
+                s_lastGear = -1;
+            if (now + s_tuning.kickHoldMs < s_kickUntil)
             {
                 accel.mode = kTriggerEffectVibration;
-                accel.vibration = { 2, Clamp8(5 + s_triggerLevel, 1, 8), 60 };
+                accel.vibration = { 0, s_tuning.kickAmp, s_tuning.kickFreq };
             }
-            else if (rumble > kRumbleThreshold)
+            else if (now < s_kickUntil)
             {
-                accel.mode = kTriggerEffectVibration;
-                accel.vibration = { 1, Clamp8(int(rumble * 8.0f + 0.5f), 1, 8), uint8_t(high > low ? 55 : 25) };
+                accel.mode = kTriggerEffectFeedback;
+                accel.feedback = { 0, 8 };
             }
+            s_limiter = car.engineValid && car.redline > 0 && car.rpm > car.redline * kLimiter && s_r2 > kHalf;
             return param;
+        }
+
+        void SendRumbleLocked()
+        {
+            uint8_t motors[2] = { uint8_t(s_rumbleLow >> 8), uint8_t(s_rumbleHigh >> 8) };  // large, small
+            if (s_limiter)
+            {
+                motors[0] = motors[0] > kLimiterLow ? motors[0] : kLimiterLow;
+                motors[1] = motors[1] > kLimiterHigh ? motors[1] : kLimiterHigh;
+            }
+            if (s_handle >= 0)
+                scePadSetVibration(s_handle, motors);
         }
 
         // Sends what the triggers should do now, if the open pad doesn't have it.
@@ -201,21 +286,11 @@ namespace ps5::pad
             if (s_handle < 0)
                 return;
             const Uint64 now = SDL_GetTicks();
-            if (s_triggerEffects)
-            {
-                if (!s_peakSince)
-                    s_peakSince = now;
-                if (s_rumbleLow > s_peakLow) s_peakLow = s_rumbleLow;
-                if (s_rumbleHigh > s_peakHigh) s_peakHigh = s_rumbleHigh;
-                if (now - s_peakSince >= 5000)
-                {
-                    if (s_peakLow || s_peakHigh)
-                        fprintf(stderr, "[ps5] triggers: game rumble peak low %.2f, high %.2f\n", s_peakLow / 65535.0, s_peakHigh / 65535.0);
-                    s_peakLow = s_peakHigh = 0;
-                    s_peakSince = now;
-                }
-            }
-            const TriggerEffectParam want = DesiredLocked();
+            LoadTuning(now);
+            const bool limiter = s_limiter;
+            const TriggerEffectParam want = DesiredLocked(now);
+            if (s_limiter != limiter)
+                SendRumbleLocked();
             if (s_sentValid && memcmp(&want, &s_sent, sizeof want) == 0)
                 return;
             const bool modeChanged = !s_sentValid || want.command[0].mode != s_sent.command[0].mode
@@ -223,12 +298,15 @@ namespace ps5::pad
             if (!force && !modeChanged && now - s_sentAt < kSendInterval)
                 return;
             const int result = scePadSetTriggerEffect(s_handle, &want);
-            // Every send while an effect runs would be a line a frame: only
-            // the changes of mode, and failures.
+            // Only the changes of mode, and failures: not a line a frame.
             if (modeChanged || result < 0)
-                fprintf(stderr, "[ps5] triggers: resistance %d, effects %s, L2 mode %u, R2 mode %u: scePadSetTriggerEffect %s (0x%08x)\n",
-                    s_triggerLevel, s_triggerEffects ? "on" : "off", unsigned(want.command[0].mode), unsigned(want.command[1].mode),
+            {
+                const telemetry::Car& car = s_car;
+                fprintf(stderr, "[ps5] triggers: L2 mode %u, R2 mode %u (resistance %d, effects %s; %.1f m/s, decel %.1f, rpm %.0f/%.0f, gear %d%s): "
+                    "scePadSetTriggerEffect %s (0x%08x)\n", unsigned(want.command[0].mode), unsigned(want.command[1].mode), s_triggerLevel,
+                    s_triggerEffects ? "on" : "off", car.speed, car.decel, car.rpm, car.redline, car.gear, car.engineValid ? "" : ", no engine",
                     result >= 0 ? "ok" : "failed", unsigned(result));
+            }
             // A failure isn't retried every frame: the next change tries again.
             s_sent = want;
             s_sentValid = true;
@@ -297,16 +375,8 @@ namespace ps5::pad
                         CloseLocked();
                     else
                         ok = data.connected != 0;
-                    s_buttons = ok ? data.buttons : 0;
+                    s_l2 = ok ? data.l2 : 0;
                     s_r2 = ok ? data.r2 : 0;
-                    const int shift = ok ? std::abs(int(data.ry) - 128) : 0;
-                    if (!s_shiftHeld && shift > kShiftPress)
-                    {
-                        s_shiftHeld = true;
-                        s_shiftKickUntil = SDL_GetTicks() + kShiftKickMs;
-                    }
-                    else if (s_shiftHeld && shift < kShiftRelease)
-                        s_shiftHeld = false;
                 }
             }
             if (!ok)
@@ -334,11 +404,11 @@ namespace ps5::pad
         bool SDLCALL Rumble(void* userdata, Uint16 low, Uint16 high)
         {
             (void)userdata;
-            const uint8_t motors[2] = { uint8_t(low >> 8), uint8_t(high >> 8) };  // large, small
             std::lock_guard lock(s_mutex);
             s_rumbleLow = low;
             s_rumbleHigh = high;
-            return s_handle >= 0 && scePadSetVibration(s_handle, motors) >= 0;
+            SendRumbleLocked();  // (with the rev limiter's buzz, while it's on)
+            return s_handle >= 0;
         }
     }
 
@@ -380,12 +450,13 @@ namespace ps5::pad
         CloseLocked();
     }
 
-    void SetTriggers(int level, bool effects)
+    void SetTriggers(int level, bool effects, const telemetry::Car& car)
     {
         level = level < 0 ? 0 : level >= int(std::size(kLevels)) ? int(std::size(kLevels)) - 1 : level;
         std::lock_guard lock(s_mutex);
         s_triggerLevel = level;
         s_triggerEffects = effects;
+        s_car = car;
         SendTriggersLocked();
     }
 }
