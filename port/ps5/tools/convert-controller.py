@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert the approved imagegen cutout to the game's byte order (no edits).
+"""Convert the DualSense cutout (dualsense.png) to the game's byte order (no edits).
 The C++ runtime composes exact native leader lines and its mip chain.
 """
 from pathlib import Path

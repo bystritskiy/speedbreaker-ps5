@@ -56,15 +56,10 @@ licensing/provenance are deliberately retained.
 
 ## Boot-cache coverage
 
-The first console check exposed a second English read path: the complete
-language resource is embedded at offset `0x586A60` of
-`GLOBAL/GLOBALMEMORYFILE.BIN` (USA archive0, sector76150). Standalone language
-checks alone cannot establish boot coverage. The generator now audits this and
-the frontend/ingame/permanent memory-file containers for exact embedded copies,
-adding84English ranges (852total). `patches.json` records container hashes and
-copy boundaries.
-
-The table was changed from stored original and replacement bytes to hashes
-and edits after the c607b1d console run; for all 852 slots, the edits applied
-to the disc's bytes give exactly the bytes that run used. The catalog test checks each patched copy equals the patched
-standalone file byte-for-byte, as well as all original layout/format invariants.
+English is also read at start-up from a complete copy of its language resource embedded in
+`GLOBAL/GLOBALMEMORYFILE.BIN` (at offset `0x586A60`; USA archive 0, sector 76150), not only from
+`LANGUAGES/ENGLISH.BIN`. The generator therefore looks for exact embedded copies of every
+language in the global, front-end, in-game and permanent memory files and patches each copy it
+finds: 84 English ranges, 852 in all. `patches.json` records the containers' hashes and the
+copies' boundaries, and the catalog test checks that each patched copy equals the patched
+standalone file byte for byte, as well as every original layout and format invariant.

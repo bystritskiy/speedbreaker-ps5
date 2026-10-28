@@ -184,8 +184,8 @@ crash report is included. **Never attach game files or disc images to an issue.*
 
 - **USA disc only** for now.
 - **Not every part of the game has been played on a console yet:** menus, Career, Quick Race,
-  pursuits, saves, sound, controls and rumble have; [`docs/PS5.md`](docs/PS5.md) is the log of
-  what was run and seen.
+  pursuits, saves, sound, controls and rumble have; [`docs/PS5.md`](docs/PS5.md) lists what has
+  been tried and what hasn't.
 - **Most of a race holds 60 fps, not all of it:** busy moments can dip into the 50s.
 - **The first time a place is seen,** objects can pop in for a frame or two while their shaders
   compile (Asynchronous Shaders); the next time, they come from the cache.

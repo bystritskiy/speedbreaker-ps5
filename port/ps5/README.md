@@ -11,7 +11,8 @@ data: it plays the files of your own disc from the console's storage.
 
 ## Status
 
-See `docs/PS5.md` for what was run on a console and what was seen.
+See `docs/PS5.md` for what has been tried on a console, and what hasn't yet;
+`docs/TESTING.md` for what to send when something goes wrong.
 
 ## Game files
 

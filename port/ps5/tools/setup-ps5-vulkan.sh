@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SpeedBreaker PS5: the console toolchain the build links against, into
-# build/ps5-deps (ignored), at the revisions the console runs were made with:
+# build/ps5-deps (ignored), at the revisions this port is tested with:
 #   - mihawk-99/PS5_Vulkan, and in its .deps the payload SDK (PS5_PayloadSDK),
 #     RADV release (PS5_Mesa) and the clean-room runtime/libc.prx
 #   - LLVM 18's Linux x86-64 libclang_rt.builtins-x86_64.a (Ubuntu's
