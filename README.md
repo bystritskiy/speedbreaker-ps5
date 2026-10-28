@@ -22,6 +22,15 @@
 </p>
 
 <p align="center">
+  <a href="https://recompstore.com/game/PPSA90505">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://recompstore.com/assets/press/badge-light.svg">
+      <img alt="Get it on RecompStore" src="https://recompstore.com/assets/press/badge-dark.svg" height="56">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
   <img src="assets/screenshots/ps5/ps5-01-race-forest-nitrous.jpg" alt="A race through a forest road at night with nitrous flames, the HUD, the rear-view mirror and the race standings" width="100%">
   <br>
   <sub>A race on the PS5, rendered at 3840x2160.</sub>
@@ -107,8 +116,8 @@ even its PlayStation button text is made at run time from your disc's own text.
 
 1. **The app.** Download `PPSA90505.zip` from the [latest release](https://github.com/bystritskiy/speedbreaker-ps5/releases/latest),
    unpack it, and copy the `PPSA90505` folder to `/data/homebrew/` on the console. The
-   **SpeedBreaker** tile appears on the home screen. A homebrew store that lists SpeedBreaker can
-   install it for you instead.
+   **SpeedBreaker** tile appears on the home screen. Or install it from
+   [RecompStore](https://recompstore.com/game/PPSA90505).
 2. **Your game files.** Extract your disc image (for example with extract-xiso) and copy
    `default.xex`, `NFS/` and `Movies/` (49 files, 7.1 GB) to `/data/speedbreaker/game/`. The
    uploader checks every file against the USA disc, reads each one back, and marks the game as
