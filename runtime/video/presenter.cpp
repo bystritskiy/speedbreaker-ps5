@@ -286,6 +286,11 @@ namespace video
         {
             if (const char* v = std::getenv("NFSMW_GAME_MODE"))
                 return v[0] == '1';
+#ifdef __PROSPERO__
+            // SpeedBreaker PS5: a console, like Steam's Game Mode: always
+            // fullscreen, the TV's whole picture.
+            return true;
+#endif
             const char* wayland = std::getenv("GAMESCOPE_WAYLAND_DISPLAY");
             const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
             return (wayland && *wayland) || (desktop && strcmp(desktop, "gamescope") == 0);
@@ -2821,6 +2826,13 @@ void main()
                     setenv("VK_DRIVER_FILES", manifest.c_str(), 1);
             }
 #endif
+#ifdef __PROSPERO__
+        // SpeedBreaker PS5: SDL's offscreen video driver with the VideoOut
+        // Vulkan WSI (port/ps5/sdl/SDL_ps5vulkan.c), and the AudioOut driver
+        // (port/ps5/sdl/SDL_ps5audio.c).
+        SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
+        SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "ps5");
+#endif
         if (!SDL_Init(SDL_INIT_VIDEO))
         {
             fprintf(stderr, "[video] SDL_Init: %s\n", SDL_GetError());
@@ -2830,6 +2842,15 @@ void main()
         hid::Initialize();
         // The size it had last time (NFSMW_WINDOW=<width>x<height> overrides).
         int windowW = settings::GetInt(settings::Id::WindowWidth), windowH = settings::GetInt(settings::Id::WindowHeight);
+#ifdef __PROSPERO__
+        // The VideoOut mode the WSI picks is the window's size: 4K, which the
+        // console scales to the TV (NFSMW_WINDOW still overrides).
+        if (!settings::EnvOverride(settings::Id::WindowWidth) && !settings::EnvOverride(settings::Id::WindowHeight))
+        {
+            windowW = 3840;
+            windowH = 2160;
+        }
+#endif
         s_gameMode = DetectGameMode();
         const bool startFullscreen = s_fullscreen.Launch(settings::GetBool(settings::Id::Fullscreen), FullscreenLocked());
         s_vsync = settings::GetBool(settings::Id::VSync);

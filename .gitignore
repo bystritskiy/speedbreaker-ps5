@@ -35,6 +35,8 @@ xcuserdata/
 # Third-party tool checkouts (scripts/setup_tools.sh)
 tools/
 /tools
+# The PS5 host's own scripts (the toolchain is the ignored /tools).
+!/port/ps5/tools/
 
 # Local survey binary
 build-survey

@@ -272,7 +272,7 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
 void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
     uint32_t thisThread = g_ppcContext->r13.u32;
-    assert(thisThread != NULL);
+    assert(thisThread != 0);
 
     std::atomic_ref owningThread(cs->OwningThread);
 
@@ -421,7 +421,7 @@ uint32_t KeTlsFree(uint32_t dwTlsIndex)
 bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
     uint32_t thisThread = g_ppcContext->r13.u32;
-    assert(thisThread != NULL);
+    assert(thisThread != 0);
 
     std::atomic_ref owningThread(cs->OwningThread);
 

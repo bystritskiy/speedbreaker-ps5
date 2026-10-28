@@ -455,6 +455,7 @@ namespace report
         }
         if (file < 0)
             fprintf(stderr, "[log] can't create a session log in %s: %s\n", dir.string().c_str(), strerror(errno));
+#ifndef __PROSPERO__
         else if (file <= 2)
         {
             // Launched with stderr (or stdin, stdout) closed, open() hands
@@ -465,6 +466,7 @@ namespace report
             close(file);
             file = moved;
         }
+#endif
 
         // fd 2 becomes the pipe; the writer copies it on (StartLogWriter).
         int fds[2];
@@ -484,6 +486,7 @@ namespace report
         }
         // With stdin, stdout or stderr closed, pipe() hands out their
         // numbers: move both ends above them before fd 2 is replaced.
+#ifndef __PROSPERO__
         for (int& fd : fds)
             if (fd <= 2)
             {
@@ -491,6 +494,7 @@ namespace report
                 close(fd);
                 fd = moved;
             }
+#endif
         if (fds[0] < 0 || fds[1] < 0)
         {
             fprintf(stderr, "[build] SpeedBreaker %s\n", BuildString());
@@ -507,6 +511,23 @@ namespace report
         fcntl(fds[1], F_SETPIPE_SZ, 1 << 20);
 #endif
         fflush(stderr);
+#ifdef __PROSPERO__
+        // Native titles cannot dup2 (EPERM). Move the C stream to the pipe
+        // instead, as the PS5 platform's klog capture does. Direct write(2)
+        // callers are not captured on this platform.
+        int terminal = -1;
+        FILE* stream = fdopen(fds[1], "w");
+        if (!stream)
+        {
+            close(fds[0]);
+            close(fds[1]);
+            if (file >= 0)
+                close(file);
+            return;
+        }
+        setvbuf(stream, nullptr, _IONBF, 0);
+        stderr = stream;
+#else
         int terminal = DupAbove2(2);
         if (dup2(fds[1], 2) < 0)
         {
@@ -521,6 +542,7 @@ namespace report
             return;
         }
         close(fds[1]);
+#endif
 #ifdef _WIN32
         // Code that writes to the process's standard error handle rather
         // than to fd 2 (the C runtime's assert, a driver) reaches the pipe too.

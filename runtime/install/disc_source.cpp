@@ -18,6 +18,7 @@
 // followed; a truncated image is reported as such (the usual way a 7.8 GB
 // copy goes wrong).
 #include "disc_source.h"
+#include <user/platform_labels.h>
 #include "manifest.h"
 
 #include <algorithm>
@@ -157,7 +158,9 @@ namespace install
 
         void AdviseSequential(int fd)
         {
-#ifdef POSIX_FADV_SEQUENTIAL
+#if defined(POSIX_FADV_SEQUENTIAL) && !defined(__PROSPERO__)
+            // The payload SDK implements this optional hint as a direct
+            // syscall, which native PS5 titles are forbidden to issue.
             posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 #else
             (void)fd;
@@ -378,11 +381,11 @@ namespace install
                 && memcmp(iso9660, "CD001", 5) == 0;
 
             if (!memcmp(head, "CON ", 4) || !memcmp(head, "LIVE", 4) || !memcmp(head, "PIRS", 4))
-                return Fail(Error::UnsupportedFormat, name + " is an Xbox 360 content package (Games on Demand or Xbox Live), "
-                    "not a disc image. Use an image of the game disc (.iso) or its extracted files.");
+                return Fail(Error::UnsupportedFormat, name + platform_labels::Text(" is an Xbox 360 content package (Games on Demand or Xbox Live), "
+                    "not a disc image. Use an image of the game disc (.iso) or its extracted files.", " is a content package, not a supported disc image. Use the game disc image (.iso) or its extracted files."));
             if (!memcmp(head, "XEX2", 4))
-                return Fail(Error::NotADiscImage, name + " is an Xbox 360 executable. Choose the folder that holds the "
-                    "extracted disc (default.xex, Movies and NFS), or a disc image.");
+                return Fail(Error::NotADiscImage, name + platform_labels::Text(" is an Xbox 360 executable. Choose the folder that holds the "
+                    "extracted disc (default.xex, Movies and NFS), or a disc image.", " is a game executable. Choose the folder holding all extracted disc files, or a supported disc image."));
             if (!memcmp(head, "PK\x03\x04", 4) || !memcmp(head, "7z\xBC\xAF", 4) || !memcmp(head, "Rar!", 4))
                 return Fail(Error::NotADiscImage, name + " is a compressed archive. Extract it first, then choose the .iso inside.");
             // An XGD2 disc starts with a DVD-video partition (ISO 9660); the game
@@ -392,9 +395,9 @@ namespace install
                 return Fail(Error::TruncatedImage, std::format("{} is incomplete: it ends after {}, before the game data "
                     "starts. Copy it again, or make a new backup from your disc.", name, FormatSize(image.size)));
             if (dvd)
-                return Fail(Error::UnsupportedFormat, name + " is a DVD image without an Xbox 360 game partition "
-                    "(perhaps only the video partition was copied). Dump the whole disc.");
-            return Fail(Error::NotADiscImage, name + " is not an Xbox 360 disc image.");
+                return Fail(Error::UnsupportedFormat, name + platform_labels::Text(" is a DVD image without an Xbox 360 game partition "
+                    "(perhaps only the video partition was copied). Dump the whole disc.", " is a DVD image without the required game partition. Copy the whole supported game disc."));
+            return Fail(Error::NotADiscImage, name + platform_labels::Text(" is not an Xbox 360 disc image.", " is not a supported game disc image."));
         }
 
         Result OpenImage(const fs::path& path, std::unique_ptr<DiscSource>& source, const OpenOptions& options)
@@ -456,7 +459,7 @@ namespace install
                 if (walk.files.empty() && !incomplete)
                 {
                     if (firstFailure.Ok())
-                        firstFailure = Fail(Error::NotADiscImage, name + " is an empty Xbox disc image.");
+                        firstFailure = Fail(Error::NotADiscImage, name + platform_labels::Text(" is an empty Xbox disc image.", " is an empty disc image."));
                     continue;
                 }
                 Result result;

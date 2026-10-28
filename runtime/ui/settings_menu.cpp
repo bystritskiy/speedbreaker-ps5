@@ -777,9 +777,9 @@ namespace ui
                 {
                     PushAccentText();
                     if (s_refused != SDL_SCANCODE_UNKNOWN)
-                        ImGui::Text("%s can't be used here. Press another key; Esc or B cancels.", RefusedName(s_refused).c_str());
+                        ImGui::Text(PadText("%s can't be used here. Press another key; Esc or B cancels.", "%s can't be used here. Press another key; Esc or Circle cancels."), RefusedName(s_refused).c_str());
                     else
-                        ImGui::Text("Press the key for %s. Esc or B cancels.", o.label);
+                        ImGui::Text(PadText("Press the key for %s. Esc or B cancels.", "Press the key for %s. Esc or Circle cancels."), o.label);
                     PopAccentText();
                     ImGui::TextDisabled(" ");
                     return;
@@ -897,6 +897,8 @@ namespace ui
         // No F1 key to speak of: the controller's chord (its Back and Start
         // are View and Menu on an Xbox pad), or touch.
         TitleText("Settings", "View + Menu on a controller, or tap with three fingers");
+#elif defined(__PROSPERO__)
+        TitleText("Settings", "Touchpad + Options");
 #elif defined(__APPLE__)
         TitleText("Settings", "F1 or Cmd+, / Back + Start");
 #else
@@ -1027,7 +1029,11 @@ namespace ui
                         if (category == Category::Advanced)
                         {
                             BugReportRow(valueWidth);
+#ifndef __PROSPERO__
+                            // Not on PS5: no curl to ask GitHub with, and
+                            // the project's releases have no PS5 download.
                             UpdateRow(valueWidth);
+#endif
                         }
                         ImGui::EndTable();
                     }
@@ -1090,8 +1096,8 @@ namespace ui
         {
             // (The Controls page leaves out "D-pad: choose": with Quit Game in the
             // footer its legend was wider than the window and lost "B: close".)
-            const char* legend = s_category == Category::Controls ? "A: set key   Y: clear   X: default   LB RB: page   B: close"
-                                                                 : "D-pad: choose, change   LB RB: page   B: close";
+            const char* legend = s_category == Category::Controls ? PadText("A: set key   Y: clear   X: default   LB RB: page   B: close", "Cross: set   Triangle: clear   Square: default   L1 R1: page   Circle: close")
+                                                                 : PadText("D-pad: choose, change   LB RB: page   B: close", "D-pad: choose, change   L1 R1: page   Circle: close");
             float w = ImGui::CalcTextSize(legend).x;
             ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - w));
             ImGui::TextDisabled("%s", legend);

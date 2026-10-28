@@ -510,6 +510,10 @@ namespace install
         {
 #if defined(_WIN32)
             return {};  // argv[0] (SetProgramPath)
+#elif defined(__PROSPERO__)
+            // Native titles have a fixed mount and no Linux /proc/self/exe.
+            // The payload SDK's readlink fallback would issue a raw syscall.
+            return "/app0/eboot.bin";
 #elif defined(__APPLE__)
             char buffer[MAXPATHLEN];
             uint32_t size = sizeof(buffer);

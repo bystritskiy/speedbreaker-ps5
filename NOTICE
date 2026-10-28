@@ -27,7 +27,16 @@ release, its copy is provided at no charge.
 
 SpeedBreaker is an unofficial, fan-made project. It is not affiliated with,
 endorsed by, or sponsored by Electronic Arts Inc., the Need for Speed brand or
-Valve Corporation. "Need for Speed" and "Most Wanted" are trademarks of
+Valve Corporation.
+
+The PS5 build (port/ps5) is an unofficial fork, SpeedBreaker-ps5, not made by
+project(u): https://github.com/bystritskiy/speedbreaker-ps5. Its source is
+there, and its app's VERSION names the commit it was built from; the source of
+the LGPL and GPL parts it adds is published next to its downloads, as
+SpeedBreaker-<version>-ps5-third-party-source.tar.xz. Neither SpeedBreaker nor
+the fork is affiliated with, endorsed by, or sponsored by Sony Interactive
+Entertainment. PlayStation, PS5, DualSense and the PlayStation Shapes are
+trademarks of Sony Interactive Entertainment Inc. "Need for Speed" and "Most Wanted" are trademarks of
 Electronic Arts Inc. Steam, Steam Deck, Steam Machine, Steam Frame and SteamOS
 are trademarks of Valve Corporation. All other trademarks belong to their
 respective owners.

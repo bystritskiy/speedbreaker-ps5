@@ -315,6 +315,13 @@ namespace install
         for (const platform::Drive& drive : platform::Drives())
             if (!drive.system && !drive.readOnly)
                 out.push_back({ drive.label, drive.root / kUserFolderName / "game", drive.removable });
+#elif defined(__PROSPERO__)
+        // SpeedBreaker PS5: USB drives and extended storage.
+        (void)ec;
+        for (int i = 0; i < 8; i++)
+            addVolume("/mnt/usb" + std::to_string(i));
+        for (int i = 0; i < 2; i++)
+            addVolume("/mnt/ext" + std::to_string(i));
 #elif defined(__APPLE__)
         for (fs::directory_iterator it("/Volumes", ec), end; !ec && it != end; it.increment(ec))
         {
@@ -371,6 +378,24 @@ namespace install
         }
 #endif
 #ifdef _WIN32
+#elif defined(__PROSPERO__)
+        // SpeedBreaker PS5: the app's own folder, /data (where FTP puts files),
+        // and every USB and extended-storage drive, at its top and in its
+        // speedbreaker folder.
+        add(fs::path("/data") / kUserFolderName);
+        add("/data");
+        for (int i = 0; i < 8; i++)
+        {
+            fs::path usb = "/mnt/usb" + std::to_string(i);
+            add(usb);
+            add(usb / kUserFolderName);
+        }
+        for (int i = 0; i < 2; i++)
+        {
+            fs::path ext = "/mnt/ext" + std::to_string(i);
+            add(ext);
+            add(ext / kUserFolderName);
+        }
 #elif defined(__APPLE__)
         // /Volumes also lists the startup disk (a link to /): skip it, a scan of
         // the whole system disk is what the folders above avoid.

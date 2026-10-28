@@ -130,7 +130,7 @@ namespace writewatch
     extern std::atomic<bool> g_submitRequested;
     // Threads that complete GPU work (command processor, completion thread)
     // never wait on it: they store through GpuThreadStore instead.
-    extern thread_local bool t_gpuThread;
+    extern constinit thread_local bool t_gpuThread;
     inline thread_local const void* t_faultPc = nullptr;  // host pc of the fault, for NFSMW_LOG_GUARD
     void GpuThreadStore(void* host, const void* data, size_t size);
     // As GpuThreadStore, for several ordered stores into [host, host + size)

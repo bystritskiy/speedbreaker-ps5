@@ -37,6 +37,15 @@
 > in-app installer verifies it and installs it. Please don't ask for, or share, game files or
 > disc images. See the full [legal notice](#legal-notice).
 
+> [!NOTE]
+> **This is SpeedBreaker-ps5, an unofficial fork that adds a native PlayStation 5 build**
+> ([`port/ps5`](port/ps5/README.md), [setup](#playstation-5-homebrew)). It is not made by
+> project(u) and is not affiliated with, endorsed by or sponsored by Sony Interactive
+> Entertainment. Everything else here is upstream SpeedBreaker's: for the other platforms, get
+> [SpeedBreaker itself](https://github.com/SpeedBreakerProject/speedbreaker), and report bugs of
+> the PS5 build here, not upstream. The PS5 build needs a console that runs homebrew; it is not a
+> PlayStation Store app.
+
 **Contents:** [What it is](#what-is-speedbreaker) · [Highlights](#highlights) ·
 [Download](#download) · [Quick start](#quick-start) · [How to update](#how-to-update) ·
 [Setup by platform](#setup-by-platform) ·
@@ -192,6 +201,15 @@ should say OK. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 - **Everywhere:** your saves, settings and the installed game are kept, and no disc image is needed. Settings > Advanced > **Check for Updates** says when there's a new release, and so does GitHub's **Watch > Custom > Releases**.
 
 ## Setup by platform
+
+### PlayStation 5 (homebrew)
+
+For a PS5 that runs homebrew, with ShadowMountPlus and an FTP server (ftpsrv): build the app
+folder and copy it and your own extracted USA disc to the console, as
+[`port/ps5/README.md`](port/ps5/README.md) describes. There is no ready-made download yet, and
+**Check for Updates** isn't offered on the PS5. What was tried on a console, and what wasn't, is
+in [`docs/PS5.md`](docs/PS5.md). Saves, settings and logs are in `/data/speedbreaker/`; a bug
+report (Settings > Advanced > **Save Bug Report**) goes there too.
 
 ### Steam Deck and Steam Machine
 
@@ -909,7 +927,11 @@ Copyright (C) 2026 project(u) and SpeedBreaker contributors.
 
 SpeedBreaker is an unofficial, fan-made project by project(u). It is **not affiliated with,
 endorsed by or sponsored by Electronic Arts Inc., the Need for Speed brand or Valve
-Corporation.**
+Corporation.** This PS5 fork is not made by project(u), and neither it nor SpeedBreaker is
+affiliated with, endorsed by or sponsored by Sony Interactive Entertainment. PlayStation, PS5,
+DualSense and the PlayStation Shapes (Cross, Circle, Square and Triangle) are trademarks of Sony
+Interactive Entertainment Inc.; the PS5 build's controller artwork and button symbols are its own
+drawings. It uses no Sony SDK: only public, community-made tools (`THIRD_PARTY_NOTICES.md`).
 
 "Need for Speed", "Most Wanted" and "Carbon" are trademarks of Electronic Arts Inc. Steam,
 Steam Deck, Steam Machine, Steam Frame, SteamOS and their logos and icons are trademarks of

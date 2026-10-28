@@ -6,6 +6,9 @@
 // asynchronous I/O the call still reports STATUS_PENDING after filling in
 // the status block and signalling the event.
 #include <stdafx.h>
+#ifdef __PROSPERO__
+#include <text_overrides.h>
+#endif
 #include <cerrno>
 #include <kernel/write_watch.h>
 #include <report/report.h>
@@ -354,6 +357,28 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t eventHandle, uint32_t apcRouti
             break;  // end of file
         n += got;
     }
+#ifdef __PROSPERO__
+    if (file->readOnly)
+    {
+        // A string slot this read touches is read whole once, from the disc.
+        auto readSlot = [file](uint64_t offset, uint8_t* slot, size_t size) {
+            for (size_t done = 0; done < size;)
+            {
+                int64_t got = platform::ReadAt(file->fd, slot + done, size - done, offset + done);
+                if (got < 0 && errno == EINTR)
+                    continue;
+                if (got <= 0)
+                    return false;
+                done += size_t(got);
+            }
+            return true;
+        };
+        const size_t changed = ps5::text::Apply(file->guestPath, pos, dst, size_t(n), readSlot);
+        static std::atomic<unsigned> reported{ 0 };
+        if (changed && reported.fetch_add(1) < 4)
+            fprintf(stderr, "[ps5 text] applied %zu scoped text fragments in %s\n", changed, file->guestPath.c_str());
+    }
+#endif
     file->position = pos + uint64_t(n);
     report::g_fileBytesRead.fetch_add(uint64_t(n), std::memory_order_relaxed);  // the hang watchdog's "loading"
 

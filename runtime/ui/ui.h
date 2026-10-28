@@ -32,6 +32,14 @@
 
 namespace ui
 {
+    constexpr const char* PadText(const char* xbox, const char* ps5)
+    {
+#ifdef __PROSPERO__
+        return ps5;
+#else
+        return xbox;
+#endif
+    }
     struct VulkanTarget
     {
         VkInstance instance;

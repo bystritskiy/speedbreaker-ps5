@@ -14,6 +14,7 @@
 // speedbreaker-bug-report-v0.1.0-<date>_<time>.zip (a labelled build's, its
 // label and commit after that).
 #include <stdafx.h>
+#include <user/platform_labels.h>
 #include "report.h"
 #include "internal.h"
 #include "scrub.h"
@@ -128,6 +129,9 @@ namespace report
         {
             if (const char* v = std::getenv("NFSMW_BUG_REPORT_DIR"); v && *v)
                 return v;
+#ifdef __PROSPERO__
+            return GetUserPath();  // FTP can retrieve the completed archive.
+#endif
             if (std::filesystem::path files = FilesAppFolder(); !files.empty())
                 return files;
             std::filesystem::path desktop = DesktopFolder();
@@ -301,7 +305,11 @@ namespace report
                     : "(no crash or hang reports)");
 
             std::string readme = std::format(
-                "SpeedBreaker (NFS: Most Wanted, Xbox 360): bug report\n"
+                #ifdef __PROSPERO__
+            "SpeedBreaker (NFS: Most Wanted, PS5 port): bug report\n"
+#else
+            "SpeedBreaker (NFS: Most Wanted, Xbox 360): bug report\n"
+#endif
                 "Saved {} (session {}, {:.0f} s in)\n"
                 "Build: SpeedBreaker {}\n\n"
                 "In here:\n",

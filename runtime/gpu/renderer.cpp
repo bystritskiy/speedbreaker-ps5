@@ -22,6 +22,10 @@
 #include "shadow_lend.h"
 #include "split_views.h"
 #include "xenos/registers.h"
+#ifdef __PROSPERO__
+#include <ps5_glyphs.h>
+#include <ps5_host.h>
+#endif
 
 #include <kernel/vmem.h>
 #include <kernel/write_watch.h>
@@ -3997,6 +4001,9 @@ void main()
             uint64_t loadedSequence = 0;  // writewatch::Current() when last loaded
             uint64_t checkedEpoch = ~0ull;  // writewatch::WriteEpoch() at the last validity check
             bool uploaded = false;
+#ifdef __PROSPERO__
+            int ps5Glyph = -1; // optional lossless native view; guest cache/watch unchanged
+#endif
             bool cube = false;
             bool volume = false;
             uint32_t layers = 1, depth = 1;
@@ -4378,8 +4385,16 @@ void main()
         }
 
         VkImageView LendView(PooledDepth& d, uint32_t swizzle);
+#ifdef __PROSPERO__
+        Texture* NativeGlyphTexture(size_t index);
+#endif
         VkImageView TextureView(Texture& t, uint32_t swizzle)
         {
+#ifdef __PROSPERO__
+            if (t.ps5Glyph >= 0)
+                if (Texture* native = NativeGlyphTexture(size_t(t.ps5Glyph)))
+                    return TextureView(*native, swizzle);
+#endif
             if (t.lend)
                 return LendView(*t.lend, swizzle);
             auto& view = t.views[swizzle];
@@ -4409,6 +4424,53 @@ void main()
             Check(vkCreateImageView(s_dev, &vci, nullptr, &view), "vkCreateImageView(texture)");
             return view;
         }
+
+#ifdef __PROSPERO__
+        // Immutable UI textures, shared by matching guest textures. As the
+        // renderer's other resources, retained until process exit. A guest
+        // overwrite clears its alias on reload; the normal watch/cache stays.
+        Texture* NativeGlyphTexture(size_t index)
+        {
+            static std::array<std::unique_ptr<Texture>, std::size(ps5::glyphs::kGlyphs)> images;
+            if (index >= images.size() || !ps5::glyphs::RgbaMip(index, 0))
+                return nullptr;
+            auto& slot = images[index];
+            if (slot)
+                return slot.get();
+            auto glyph = std::make_unique<Texture>();
+            glyph->format = VK_FORMAT_R8G8B8A8_UNORM;
+            glyph->width = glyph->height = 128;
+            glyph->levels = 8;
+            glyph->image = CreateImage(VK_IMAGE_TYPE_2D, glyph->format, {128,128,1}, 1,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 8);
+            constexpr VkDeviceSize chainBytes = 87380;
+            const VkDeviceSize at = RingAllocate(chainBytes);
+            assert(at != ~VkDeviceSize(0)); // 85KB fits in a 16MB staging slot
+            EndPass();
+            Begin();
+            VkBufferImageCopy regions[8]{};
+            VkDeviceSize offset = 0;
+            for (uint32_t level = 0; level < 8; ++level)
+            {
+                const uint32_t extent = 128 >> level;
+                const VkDeviceSize bytes = VkDeviceSize(extent) * extent * 4;
+                memcpy(s_ringHost + at + offset, ps5::glyphs::RgbaMip(index, level), size_t(bytes));
+                regions[level].bufferOffset = at + offset;
+                regions[level].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
+                regions[level].imageExtent = { extent, extent, 1 };
+                offset += bytes;
+            }
+            ToGeneral(glyph->image.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            FullBarrier();
+            vkCmdCopyBufferToImage(s_cmd, s_ring, glyph->image.image, VK_IMAGE_LAYOUT_GENERAL, 8, regions);
+            FullBarrier();
+            glyph->uploaded = true;
+            fprintf(stderr, "[ps5 glyphs] %s: lossless 128x128 RGBA uploaded\n", ps5::glyphs::kGlyphs[index].name);
+            slot = std::move(glyph);
+            return slot.get();
+        }
+#endif
 
         // The view for texture fetch constant `slot` sampled as 2D or as a
         // cube, or the placeholder. Base level only; each cube face is a
@@ -4711,6 +4773,36 @@ void main()
                         return TextureView(t, f.swizzle);
                     }
                     s_hitch.textureBytes += size + mipSize;
+                    // Replace only fingerprinted USA controller artwork. Keep
+                    // the guest BC3 format and supply every mip, so filtering
+                    // cannot bring the Xbox letters back. Disc data stays intact.
+                    const uint8_t* ps5GlyphMips[9] = {};
+#ifdef __PROSPERO__
+                    t.ps5Glyph = -1;
+                    if (!cube && !volume && !f.stacked && width == 32 && height == 32 &&
+                        format == 20 && f.tiled && uint32_t(f.endianness) == 1 && pitchAligned == 32 && offX == 0 && offY == 0)
+                    {
+                        if (const auto* glyph = ps5::glyphs::Find(s_sharedHost + base))
+                        {
+                            t.ps5Glyph = int(glyph - std::begin(ps5::glyphs::kGlyphs));
+                            for (uint32_t level = 0; level < 6; ++level)
+                                ps5GlyphMips[level] = glyph->data + ps5::glyphs::kMipOffsets[level];
+                            static std::unordered_set<const void*> logged;
+                            if (logged.insert(glyph).second)
+                                fprintf(stderr, "[ps5 glyphs] %s: replaced all mip levels\n", glyph->name);
+                        }
+                    }
+                    if (!cube && !volume && !f.stacked && width == 256 && height == 256 &&
+                        format == 6 && f.tiled && uint32_t(f.endianness) == 2 && pitchAligned == 256 && offX == 0 && offY == 0)
+                    {
+                        if (const uint8_t* first = ps5::controls::ControllerMip(s_sharedHost + base, 0))
+                        {
+                            ps5GlyphMips[0] = first;
+                            for (uint32_t level = 1; level <= maxLevel && level < 9; ++level)
+                                ps5GlyphMips[level] = ps5::controls::ControllerMip(s_sharedHost + base, level);
+                        }
+                    }
+#endif
                     EnsureShadow(base, size);
                     if (mipSize)
                         EnsureShadow(mipBase, mipSize);
@@ -4729,7 +4821,7 @@ void main()
                     }
                     for (uint32_t slice = 0; slice < layers * depth; slice++)
                     {
-                        if (t.storeView)  // stored directly (one 2D slice, or a cube's face: see s_untileStorePipeline)
+                        if (t.storeView && !ps5GlyphMips[0])  // native replacements use the staging copy even without mips
                         {
                             EndPass();
                             Begin();
@@ -4767,18 +4859,23 @@ void main()
                             zSlice, heightAligned3D };
                         if (volume && f.tiled)
                             uc.tiled = 2;
-                        VkDescriptorBufferInfo ring{ s_ring, 0, kRingSize };
-                        VkWriteDescriptorSet w[5] = {
-                            { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
-                            { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
-                        };
-                        s_stateEpoch++;
-                        vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
-                        s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
-                        vkCmdPushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
-                        uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? bw : rowWords;
-                        if (!(s_exp & 4))
-                            vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (bh + 7) / 8, 1);
+                        if (ps5GlyphMips[0])
+                            memcpy(s_ringHost + staging, ps5GlyphMips[0], size_t(rowWords) * 4 * bh);
+                        else
+                        {
+                            VkDescriptorBufferInfo ring{ s_ring, 0, kRingSize };
+                            VkWriteDescriptorSet w[5] = {
+                                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
+                                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
+                            };
+                            s_stateEpoch++;
+                            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
+                            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
+                            vkCmdPushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
+                            uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? bw : rowWords;
+                            if (!(s_exp & 4))
+                                vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (bh + 7) / 8, 1);
+                        }
                         FullBarrier();
                         if (!t.uploaded && slice == 0)
                             ToGeneral(t.image.image, VK_IMAGE_ASPECT_COLOR_BIT, layers);
@@ -4825,17 +4922,22 @@ void main()
                                 f.tiled ? mips.PitchBlocks(storage) : mips.RowBytes(storage), fi.bpbLog2,
                                 levelOffX, levelOffY, lbw, lbh, uint32_t(f.endianness), fi.convert, uint32_t(staging / 4), levelRowWords,
                                 0, 0 };
-                            VkDescriptorBufferInfo ring{ s_ring, 0, kRingSize };
-                            VkWriteDescriptorSet w[5] = {
-                                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
-                                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
-                            };
-                            s_stateEpoch++;
-                            vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
-                            s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
-                            vkCmdPushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
-                            uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? lbw : levelRowWords;
-                            vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (lbh + 7) / 8, 1);
+                            if (level < 9 && ps5GlyphMips[level])
+                                memcpy(s_ringHost + staging, ps5GlyphMips[level], size_t(levelRowWords) * 4 * lbh);
+                            else
+                            {
+                                VkDescriptorBufferInfo ring{ s_ring, 0, kRingSize };
+                                VkWriteDescriptorSet w[5] = {
+                                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &s_sharedInfo[0], nullptr },
+                                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ring, nullptr },
+                                };
+                                s_stateEpoch++;
+                                vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untilePipeline);
+                                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_untileLayout, 0, AddSharedParts(w, 2), w);
+                                vkCmdPushConstants(s_cmd, s_untileLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uc), &uc);
+                                uint32_t groupsX = fi.convert != 0 || fi.bpbLog2 >= 2 ? lbw : levelRowWords;
+                                vkCmdDispatch(s_cmd, (groupsX + 7) / 8, (lbh + 7) / 8, 1);
+                            }
                             FullBarrier();
                             VkBufferImageCopy region{};
                             region.bufferOffset = staging;

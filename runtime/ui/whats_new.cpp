@@ -103,7 +103,7 @@ namespace ui
             bool close = ImGui::Button("OK");
             ImGui::SameLine();
             {
-                const char* legend = "A or B: close";
+                const char* legend = PadText("A or B: close", "Cross or Circle: close");
                 float w = ImGui::CalcTextSize(legend).x;
                 ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - w));
                 ImGui::TextDisabled("%s", legend);

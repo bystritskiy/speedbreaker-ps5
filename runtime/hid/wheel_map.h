@@ -21,6 +21,7 @@
 //     numbers beat both (the pedals of a wheel we don't know are the one
 //     thing the first two can get wrong: three springs look alike).
 #pragma once
+#include <user/platform_labels.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -384,16 +385,16 @@ namespace hid::wheelmap
     };
 
     inline constexpr ControlInfo kControls[kControlCount] = {
-        { Control::A, button::A, Role::Button, "A" },
-        { Control::B, button::B, Role::Button, "B" },
-        { Control::X, button::X, Role::Button, "X" },
-        { Control::Y, button::Y, Role::Button, "Y" },
-        { Control::LB, button::LeftShoulder, Role::Button, "LB" },
-        { Control::RB, button::RightShoulder, Role::Button, "RB" },
-        { Control::Back, button::Back, Role::Button, "Back" },
-        { Control::Start, button::Start, Role::Button, "Start" },
-        { Control::LS, button::LeftThumb, Role::Button, "Left stick click" },
-        { Control::RS, button::RightThumb, Role::Button, "Right stick click" },
+        { Control::A, button::A, Role::Button, platform_labels::Text("A", "Cross") },
+        { Control::B, button::B, Role::Button, platform_labels::Text("B", "Circle") },
+        { Control::X, button::X, Role::Button, platform_labels::Text("X", "Square") },
+        { Control::Y, button::Y, Role::Button, platform_labels::Text("Y", "Triangle") },
+        { Control::LB, button::LeftShoulder, Role::Button, platform_labels::Text("LB", "L1") },
+        { Control::RB, button::RightShoulder, Role::Button, platform_labels::Text("RB", "R1") },
+        { Control::Back, button::Back, Role::Button, platform_labels::Text("Back", "Touchpad") },
+        { Control::Start, button::Start, Role::Button, platform_labels::Text("Start", "Options") },
+        { Control::LS, button::LeftThumb, Role::Button, platform_labels::Text("Left stick click", "L3") },
+        { Control::RS, button::RightThumb, Role::Button, platform_labels::Text("Right stick click", "R3") },
         { Control::ShiftUp, 0, Role::ShiftUp, "Shift up" },
         { Control::ShiftDown, 0, Role::ShiftDown, "Shift down" },
     };

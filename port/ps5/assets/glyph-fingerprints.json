@@ -1,0 +1,96 @@
+{
+  "source": "USA GLOBAL\\GLOBALB.BUN, Global\\GlobalTexturesXENON.tpk; names are inherited from PS2, mapping verified from decoded Xbox images",
+  "source_sha256": "6ef059bc912809cfdb58e6d7326c5dfdea43fb2d25e335e24903b771fd360d3e",
+  "textures": [
+    {
+      "texture": "L1",
+      "hash": "45262af44e3ea4d9",
+      "ps5": "L2"
+    },
+    {
+      "texture": "L2",
+      "hash": "42d8301b40e72624",
+      "ps5": "L1"
+    },
+    {
+      "texture": "R1",
+      "hash": "0e69864ecd4915ef",
+      "ps5": "R2"
+    },
+    {
+      "texture": "R2",
+      "hash": "715f4ffe5f892595",
+      "ps5": "R1"
+    },
+    {
+      "texture": "R3",
+      "hash": "704e948d93c66cdb",
+      "ps5": "R3"
+    },
+    {
+      "texture": "BACK",
+      "hash": "7fd4fa678ab5da80",
+      "ps5": "Touchpad"
+    },
+    {
+      "texture": "CROSS",
+      "hash": "366c20e7f640a692",
+      "ps5": "Cross"
+    },
+    {
+      "texture": "GUIDE",
+      "hash": "5db8023a99705235",
+      "ps5": "PS"
+    },
+    {
+      "texture": "START",
+      "hash": "7f6a408f64962fc4",
+      "ps5": "Options"
+    },
+    {
+      "texture": "CIRCLE",
+      "hash": "8c70c20a841d1605",
+      "ps5": "Triangle"
+    },
+    {
+      "texture": "R3_SPANISH",
+      "hash": "e3bc7f88fd63d4d9",
+      "ps5": "R3"
+    },
+    {
+      "texture": "R3_ITALIAN",
+      "hash": "19dfdb52e44150f0",
+      "ps5": "R3"
+    },
+    {
+      "texture": "TRIANGLE",
+      "hash": "34fd46e9a7f7fa8b",
+      "ps5": "Circle"
+    },
+    {
+      "texture": "SELECT",
+      "hash": "715f4ffe5f892595",
+      "ps5": "R1"
+    },
+    {
+      "texture": "SQUARE",
+      "hash": "5f4feadf779c717c",
+      "ps5": "Square"
+    },
+    {
+      "texture": "R3_FRENCH",
+      "hash": "bc67799659fdf5d4",
+      "ps5": "R3"
+    },
+    {
+      "texture": "RIGHT_TRIGGER_FRENCH",
+      "hash": "596fc07dfee857f1",
+      "ps5": "R2"
+    },
+    {
+      "texture": "LEFT_TRIGGER_FRENCH",
+      "hash": "713844746d47f6e6",
+      "ps5": "L2"
+    }
+  ]
+}

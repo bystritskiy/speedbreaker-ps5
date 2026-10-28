@@ -1,5 +1,9 @@
 # SpeedBreaker runtime. GPL-3.0-or-later (see COPYING).
 set(XR ${CMAKE_CURRENT_SOURCE_DIR}/../tools/XenonRecomp)
+if(SB_PS5)
+    # The libraries port/ps5/tools/build-deps.sh builds for the console.
+    set(SB_PS5_DEPS ${CMAKE_SOURCE_DIR}/build/ps5-deps CACHE PATH "PS5 libraries (port/ps5/tools/build-deps.sh)")
+endif()
 
 # XEX loading (decryption, LZX) comes from XenonRecomp's XenonUtils; compile
 # the few sources we need rather than linking its tool build.
@@ -60,21 +64,46 @@ if(IOS)
     # On iOS the app is linked and signed by Xcode (scripts/ios): the runtime
     # is a static library there, and the app links it with the rest.
     add_library(SpeedBreaker STATIC ${RUNTIME_SOURCES})
+elseif(SB_PS5)
+    # SpeedBreaker PS5: a static library too, linked with RADV and signed by
+    # port/ps5/tools/link.sh (port/ps5/README.md). The host's own code
+    # (port/ps5/src) and the Vulkan loader's exports (gen-vulkan-shim.py)
+    # join the runtime.
+    file(GLOB PS5_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../port/ps5/src/*.cpp)
+    add_library(SpeedBreaker STATIC ${RUNTIME_SOURCES} ${PS5_SOURCES} ${SB_PS5_DEPS}/vulkan/vulkan_shim.c)
 else()
     add_executable(SpeedBreaker ${RUNTIME_SOURCES})
 endif()
 target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/kernel)
-find_package(SDL3 REQUIRED CONFIG)
+if(SB_PS5)
+    target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../port/ps5/src)
+endif()
+if(SB_PS5)
+    # SpeedBreaker PS5: the libraries port/ps5/tools/build-deps.sh builds for
+    # the console, in SB_PS5_DEPS (set above; outside the SDK's sysroot).
+    find_package(SDL3 REQUIRED CONFIG PATHS ${SB_PS5_DEPS}/sdl3 NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+    find_package(glslang REQUIRED CONFIG PATHS ${SB_PS5_DEPS}/glslang NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+    set(FFMPEG_XMA ${SB_PS5_DEPS}/ffmpeg-xma CACHE PATH "FFmpeg-XMA's install prefix")
+else()
+    find_package(SDL3 REQUIRED CONFIG)
+endif()
 if(IOS)
     # iOS has no Vulkan loader: the app links MoltenVK statically, and the
     # runtime compiles against MoltenVK's own Vulkan headers.
     set(MOLTENVK_DIR "" CACHE PATH "MoltenVK's iOS package (with MoltenVK/include and MoltenVK/static)")
     add_library(Vulkan::Vulkan INTERFACE IMPORTED)
     target_include_directories(Vulkan::Vulkan INTERFACE ${MOLTENVK_DIR}/MoltenVK/include)
+elseif(SB_PS5)
+    # No loader either: RADV is linked in, and vulkan_shim.c stands for the
+    # loader's exports. Mesa's own headers, the version RADV is built from.
+    add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+    target_include_directories(Vulkan::Vulkan INTERFACE ${SB_PS5_DEPS}/vulkan/include)
 else()
     find_package(Vulkan REQUIRED)
 endif()
-find_package(glslang REQUIRED CONFIG)
+if(NOT SB_PS5)
+    find_package(glslang REQUIRED CONFIG)
+endif()
 # FFmpeg for XMA audio: the minimal static build that scripts/setup_tools.sh
 # makes in tools/ffmpeg-xma (with patches/ffmpeg applied: no sample hold-back
 # for single-stream XMA, which the game's audio mixer depends on).

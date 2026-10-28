@@ -1,5 +1,6 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See installer.h.
 #include "installer.h"
+#include <user/platform_labels.h>
 
 #include <user/paths.h>
 #ifdef __APPLE__
@@ -38,7 +39,7 @@ namespace install
         constexpr const char* kGameName = "Need for Speed: Most Wanted";
         // The releases the compiled-in manifests were generated from
         // (config/nfsmw.toml, config/nfsmw-pal-es.toml).
-        constexpr const char* kReleases = "the USA and the European (PAL, Spanish) Xbox 360 releases";
+        constexpr const char* kReleases = platform_labels::Text("the USA and the European (PAL, Spanish) Xbox 360 releases", "the supported USA and European (Spanish) disc data");
         constexpr size_t kChunk = 4 << 20;
         // Room beyond the files themselves: directory blocks, the marker, and
         // not filling the user's disk to the last byte.
@@ -627,9 +628,9 @@ namespace install
         {
             // Original Xbox discs boot default.xbe.
             if (source.Find("default.xbe"))
-                return Fail(Error::WrongGame, std::format("{} holds an original Xbox game, not {} for Xbox 360.",
+                return Fail(Error::WrongGame, std::format(platform_labels::Text("{} holds an original Xbox game, not {} for Xbox 360.", "{} holds another game or an unsupported edition, not the required {} disc data."),
                     What(source), kGameName), "default.xbe");
-            return Fail(Error::NotADiscImage, std::format("{} has no default.xex: it is not an Xbox 360 game.",
+            return Fail(Error::NotADiscImage, std::format(platform_labels::Text("{} has no default.xex: it is not an Xbox 360 game.", "{} has no default.xex: required game data is missing."),
                 What(source)), "default.xex");
         }
         if (!r.Ok())
@@ -646,7 +647,7 @@ namespace install
             r = Fail(Error::WrongGame, id.titleId
                 ? std::format("{} is not {}: it holds another game (title ID {:08X}; {} is {:08X}).", What(source),
                     kGameName, id.titleId, kGameName, manifest.titleId)
-                : std::format("{} is not {}: its default.xex is not an Xbox 360 game executable.", What(source), kGameName),
+                : std::format(platform_labels::Text("{} is not {}: its default.xex is not an Xbox 360 game executable.", "{} is not a supported copy of {}: its game executable is not recognized."), What(source), kGameName),
                 id.file->path);
             r.foundHash = found;
             return r;

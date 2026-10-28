@@ -6,6 +6,9 @@
 #include "player_slots.h"
 #include "rumble_note.h"
 #include "wheel.h"
+#ifdef __PROSPERO__
+#include <ps5_host.h>
+#endif
 #include <cpu/guest_time.h>
 #include <game/split_screen.h>
 #include <kernel/function.h>
@@ -804,8 +807,13 @@ namespace
     // or one that drops out and straight back, brings up nothing; and one
     // that turns up while the notice shows takes it down. Main thread;
     // guest ns, 0: none due.
+#ifdef __PROSPERO__
+    constexpr const char* kNeedsController = "Connect a DualSense controller to play.";
+    constexpr const char* kControllerGone = "Controller disconnected. Reconnect your DualSense to continue.";
+#else
     constexpr const char* kNeedsController = "The game needs a controller: an Xbox or PlayStation one over Bluetooth, or a Backbone.";
     constexpr const char* kControllerGone = "Controller disconnected: the game needs one (Xbox or PlayStation over Bluetooth, or a Backbone).";
+#endif
     int64_t s_noControllerAt = 0;
     const char* s_noControllerText = nullptr;
 
@@ -1042,6 +1050,9 @@ namespace hid
     {
         if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
             fprintf(stderr, "[input] SDL gamepad init failed: %s\n", SDL_GetError());
+#ifdef __PROSPERO__
+        ps5::pad::Attach();  // the DualSense (port/ps5/src/pad_ps5.cpp)
+#endif
         fprintf(stderr, "[input] stick deadzone %.2f, trigger deadzone %.2f\n", settings::GetFloat(settings::Id::StickDeadzone),
             settings::GetFloat(settings::Id::TriggerDeadzone));
         AttachVirtualPad();

@@ -22,6 +22,7 @@
 // (platform/stack.h), through a handle each thread opens on itself as it
 // registers.
 #include <stdafx.h>
+#include <user/platform_labels.h>
 #include "report.h"
 #include "internal.h"
 
@@ -30,6 +31,7 @@
 #include <cpu/guest_time.h>
 #include <gpu/command_processor.h>
 #include <ui/ui.h>
+#include <platform/thread.h>
 #include <video/presenter.h>
 
 #include <SDL3/SDL_events.h>
@@ -330,7 +332,7 @@ namespace report
         {
             std::vector<ThreadSample> samples = SampleThreads();
             std::string text;
-            text += "SpeedBreaker (NFS: Most Wanted, Xbox 360): hang report\n";
+            text += platform_labels::Text("SpeedBreaker (NFS: Most Wanted, Xbox 360): hang report\n", "SpeedBreaker (NFS: Most Wanted, PS5 port): hang report\n");
             text += std::format("Build: SpeedBreaker {}\n", BuildString());
             text += std::format("Session: {} (log: {}.log), {:.1f} s in; written {}\n", SessionName(), SessionName(),
                 SessionSeconds(), detail::TimeStamp());
@@ -657,6 +659,8 @@ namespace report
                 name[sizeof(name) - 1] = 0;
                 LocalFree(description);
             }
+#elif defined(__PROSPERO__)
+            snprintf(name, sizeof(name), "%s", platform::CurrentThreadName());
 #else
             pthread_getname_np(pthread_self(), name, sizeof(name));
 #endif

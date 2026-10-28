@@ -9,6 +9,9 @@
 #include <unistd.h>
 #endif
 #include <time.h>
+#ifdef __PROSPERO__
+#include <ps5platform/kernel.h>
+#endif
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -16,7 +19,7 @@
 namespace writewatch
 {
     std::atomic<bool> g_submitRequested{ false };
-    thread_local bool t_gpuThread = false;
+    constinit thread_local bool t_gpuThread = false;
     std::atomic<uint32_t> g_snapsOpen{ 0 };
 
     namespace
@@ -216,7 +219,18 @@ namespace writewatch
                     page++;
                 if (page == first + count)
                     continue;
-                mprotect(PageHost(w, page), size_t(first + count - page) << s_pageShift, prot);
+                int protection = prot;
+#ifdef __PROSPERO__
+                // RADV imports the 0xA window at its CPU virtual address and
+                // grants GPU read/write there. sceKernelMprotect replaces
+                // both CPU and GPU rights: a CPU-only write-watch change
+                // would revoke the GPU mapping (GPU_FAULT_PAGE_FAULT_ASYNC).
+                // Keep GPU rights on the imported view even with PROT_NONE
+                // for the CPU. The C/E mirrors remain CPU-only.
+                if (w == 0)
+                    protection |= PS5_KERNEL_PROT_GPU_READ | PS5_KERNEL_PROT_GPU_WRITE;
+#endif
+                mprotect(PageHost(w, page), size_t(first + count - page) << s_pageShift, protection);
                 s_protects.fetch_add(1, std::memory_order_relaxed);
             }
             s_protectNs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()),

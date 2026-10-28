@@ -217,7 +217,7 @@ namespace ui
             bool open = ImGui::Button("Open download page");
             ImGui::SameLine();
             bool close = ImGui::Button("Close");
-            Legend("D-pad: scroll, choose   A: select   B: back");
+            Legend(PadText("D-pad: scroll, choose   A: select   B: back", "D-pad: scroll, choose   Cross: select   Circle: back"));
             if (open)
                 OpenPage(r.url);
             return close;
@@ -244,7 +244,7 @@ namespace ui
                 ImGui::SameLine();
                 retry = ImGui::Button("Try again");
             }
-            Legend(failed ? "D-pad: choose   A: select   B: back" : "A or B: back");
+            Legend(failed ? PadText("D-pad: choose   A: select   B: back", "D-pad: choose   Cross: select   Circle: back") : PadText("A or B: back", "Cross or Circle: back"));
             if (retry)
                 update::StartCheck();
             return close;
@@ -263,7 +263,7 @@ namespace ui
             ImGui::Spacing();
             FocusOnce("checking");
             bool close = ImGui::Button("Close");
-            Legend("A or B: back (the check carries on)");
+            Legend(PadText("A or B: back (the check carries on)", "Cross or Circle: back (the check carries on)"));
             return close;
         }
     }

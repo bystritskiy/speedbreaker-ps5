@@ -6,7 +6,99 @@
 #include <platform/memory.h>
 #endif
 
-#ifndef _WIN32
+#ifdef __PROSPERO__
+#include <cerrno>
+#include <sys/mman.h>
+#include <ps5platform/shm.h>
+
+// SpeedBreaker PS5: the guest's 4 GB is a reserved range (ps5_vrange_reserve),
+// filled with views of direct memory (ps5platform/shm.h): one object for
+// everything below the physical windows (virtual heaps, the image, the
+// function table), and one 512 MB object for physical memory, mapped at all
+// three windows. Anonymous memory would be charged to the title's small
+// flexible budget; direct memory is charged to the direct pool only, and one
+// object can be mapped any number of times. Everything is committed up front
+// (3 GB), as UnleashedRecomp-Prospero does; vmem.cpp then clears released
+// pages in place instead of remapping them.
+bool Memory::MapPhysicalMirrors()
+{
+    constexpr size_t PHYSICAL_SIZE = 0x20000000;  // 512 MB
+    struct ps5_shm phys{};
+    int rc = ps5_shm_create(PHYSICAL_SIZE, &phys);
+    if (rc != 0)
+    {
+        fprintf(stderr, "[memory] ps5_shm_create(physical): 0x%x\n", unsigned(rc));
+        failedError = rc;
+        return false;
+    }
+    // The 0xE0000000 window's 4 KB shift is not a 64 KB direct-memory unit:
+    // unshifted, as on 16 KB-page Apple hosts (MmGetPhysicalAddress uses
+    // eWindowShift).
+    eWindowShift = 0;
+    for (uint32_t guest : { 0xA0000000u, 0xC0000000u, 0xE0000000u })
+    {
+        void* view = nullptr;
+        rc = ps5_shm_map(&phys, 0, PHYSICAL_SIZE, base + guest, PS5_SHM_READ | PS5_SHM_WRITE, PS5_SHM_FIXED, &view);
+        if (rc != 0 || view != base + guest)
+        {
+            fprintf(stderr, "[memory] ps5_shm_map(physical at 0x%08X): 0x%x\n", guest, unsigned(rc));
+            failedError = rc;
+            return false;
+        }
+    }
+    return true;
+}
+
+Memory::Memory()
+{
+    constexpr size_t LOW_SIZE = 0xA0000000;  // below the physical windows
+    void* range = nullptr;
+    int rc = ps5_vrange_reserve(PPC_MEMORY_SIZE, (void*)0x1000000000ull, 0x10000, &range);
+    if (rc != 0 || range == nullptr)
+    {
+        fprintf(stderr, "[memory] ps5_vrange_reserve(4 GB): 0x%x\n", unsigned(rc));
+        failedStep = 1;
+        failedError = rc ? rc : ENOMEM;
+        return;
+    }
+    base = static_cast<uint8_t*>(range);
+    struct ps5_shm low{};
+    void* view = nullptr;
+    rc = ps5_shm_create(LOW_SIZE, &low);
+    if (rc == 0)
+        rc = ps5_shm_map(&low, 0, LOW_SIZE, base, PS5_SHM_READ | PS5_SHM_WRITE, PS5_SHM_FIXED, &view);
+    if (rc != 0 || view != base)
+    {
+        fprintf(stderr, "[memory] direct memory for the guest's low 2.5 GB: 0x%x\n", unsigned(rc));
+        failedStep = 1;
+        failedError = rc ? rc : ENOMEM;
+        base = nullptr;
+        return;
+    }
+    // Guest null pointers fault: the first host page (16 KB) is not accessible.
+    if (mprotect(base, 0x4000, PROT_NONE) != 0)
+    {
+        failedStep = 1;
+        failedError = errno;
+        fprintf(stderr, "[memory] guest null-page protection: errno %d\n", failedError);
+        base = nullptr;
+        return;
+    }
+    if (!MapPhysicalMirrors())
+    {
+        failedStep = 2;
+        base = nullptr;
+        return;
+    }
+    fprintf(stderr, "[memory] guest 4 GB at %p in direct memory\n", static_cast<void*>(base));
+
+    for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
+    {
+        if (PPCFuncMappings[i].host != nullptr)
+            InsertFunction(PPCFuncMappings[i].guest, PPCFuncMappings[i].host);
+    }
+}
+#elif !defined(_WIN32)
 #include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
@@ -97,6 +189,7 @@ bool Memory::MapPhysicalMirrors()
 }
 #endif
 
+#ifndef __PROSPERO__
 Memory::Memory()
 {
 #ifdef _WIN32
@@ -164,6 +257,7 @@ Memory::Memory()
             InsertFunction(PPCFuncMappings[i].guest, PPCFuncMappings[i].host);
     }
 }
+#endif
 
 void* MmGetHostAddress(uint32_t ptr)
 {

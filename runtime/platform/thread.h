@@ -15,6 +15,10 @@
 #else
 #include <pthread.h>
 #endif
+#ifdef __PROSPERO__
+#include <cstdio>
+#include <pthread_np.h>
+#endif
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
@@ -58,12 +62,31 @@ namespace platform
         pthread_join(thread, nullptr);
     }
 
+#ifdef __PROSPERO__
+    // SpeedBreaker PS5: libkernel names threads (pthread_set_name_np) but
+    // has no FreeBSD pthread_get_name_np; the name is kept here for whoever
+    // asks (report/watchdog.cpp).
+    inline char* CurrentThreadNameBuffer()
+    {
+        static thread_local char name[32];
+        return name;
+    }
+
+    inline const char* CurrentThreadName()
+    {
+        return CurrentThreadNameBuffer();
+    }
+#endif
+
     inline void NameCurrentThread(const char* name)
     {
 #if defined(__APPLE__)
         pthread_setname_np(name);
 #elif defined(__linux__)
         pthread_setname_np(pthread_self(), name);
+#elif defined(__PROSPERO__)
+        snprintf(CurrentThreadNameBuffer(), 32, "%s", name);
+        pthread_set_name_np(pthread_self(), name);
 #else
         (void)name;
 #endif

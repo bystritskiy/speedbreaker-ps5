@@ -30,6 +30,7 @@
 // the crash broke it, PPCFuncMappings names the recompiled functions and the
 // RtlVirtualUnwind walk below gives the frames.
 #include <stdafx.h>
+#include <user/platform_labels.h>
 #include <region/region.h>
 #include "report.h"
 #include "internal.h"
@@ -235,7 +236,13 @@ namespace report
         // The target of an unconditional jump at `code`, or `code`.
         uintptr_t FollowJump(uintptr_t code)
         {
-#if defined(__aarch64__)
+#if defined(__PROSPERO__)
+            // Native PS5 text is execute-only. Inspecting a wrapper's jump
+            // instruction faults with SYSTEM_XO_VIOLATION, even at startup.
+            // Keep the known entry address; full symbolization uses the
+            // matching host-side llvm-pie.elf rather than reading live code.
+            return code;
+#elif defined(__aarch64__)
             uint32_t insn;
             memcpy(&insn, reinterpret_cast<const void*>(code), 4);
             if ((insn & 0xFC000000u) == 0x14000000u)  // B imm26
@@ -370,6 +377,8 @@ namespace report
             return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__linux__) && defined(__aarch64__)
             return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext.pc);
+#elif defined(__PROSPERO__)
+            return reinterpret_cast<void*>(static_cast<ucontext_t*>(context)->uc_mcontext.mc_rip);
 #elif defined(_WIN32) && defined(_M_X64)
             return reinterpret_cast<void*>(static_cast<CONTEXT*>(context)->Rip);
 #else
@@ -532,7 +541,11 @@ namespace report
             fprintf(stderr, "[crash] can't prepare a crash report file in %s: %s\n", dir.string().c_str(), strerror(errno));
 
         std::string header = std::format(
+            #ifdef __PROSPERO__
+            "SpeedBreaker (NFS: Most Wanted, PS5 port): crash report\n"
+#else
             "SpeedBreaker (NFS: Most Wanted, Xbox 360): crash report\n"
+#endif
             "Build: SpeedBreaker {}\n"
             "Session: {} (log: {}.log), started {}\n",
             BuildString(), SessionName(), SessionName(), detail::TimeStamp());
@@ -734,6 +747,22 @@ namespace report
         auto& mc = static_cast<ucontext_t*>(context)->uc_mcontext;
         b.Str("[crash] host registers: pc=0x").Hex(uint64_t(mc.pc)).Str(" lr=0x").Hex(uint64_t(mc.regs[30]))
             .Str(" sp=0x").Hex(uint64_t(mc.sp)).Char('\n');
+#elif defined(__PROSPERO__)
+        const auto& mc = static_cast<ucontext_t*>(context)->uc_mcontext;
+        b.Str("[crash] host registers: rip=0x").Hex(mc.mc_rip).Str(" rsp=0x").Hex(mc.mc_rsp)
+            .Str(" rbp=0x").Hex(mc.mc_rbp).Str(" err=0x").Hex(mc.mc_err).Char('\n');
+        const struct { const char* name; uint64_t value; } registers[] = {
+            { "rax", uint64_t(mc.mc_rax) }, { "rbx", uint64_t(mc.mc_rbx) }, { "rcx", uint64_t(mc.mc_rcx) }, { "rdx", uint64_t(mc.mc_rdx) },
+            { "rsi", uint64_t(mc.mc_rsi) }, { "rdi", uint64_t(mc.mc_rdi) }, { "r8", uint64_t(mc.mc_r8) }, { "r9", uint64_t(mc.mc_r9) },
+            { "r10", uint64_t(mc.mc_r10) }, { "r11", uint64_t(mc.mc_r11) }, { "r12", uint64_t(mc.mc_r12) }, { "r13", uint64_t(mc.mc_r13) },
+            { "r14", uint64_t(mc.mc_r14) }, { "r15", uint64_t(mc.mc_r15) },
+        };
+        for (size_t i = 0; i < std::size(registers); i++)
+        {
+            b.Str(i % 4 == 0 ? "[crash]   " : " ").Str(registers[i].name).Str("=0x").Hex(registers[i].value);
+            if (i % 4 == 3 || i + 1 == std::size(registers))
+                b.Char('\n');
+        }
 #endif
         // Innermost first: the faulting code, then its callers (the
         // handler's own frames left out).

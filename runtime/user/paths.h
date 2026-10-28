@@ -73,7 +73,10 @@ inline const char*& CacheFolderName()
 //        and MSYS2 set: where the data went would depend on the launcher.
 inline std::filesystem::path UserDataBase()
 {
-#ifdef _WIN32
+#ifdef __PROSPERO__
+    // SpeedBreaker PS5: the console's writable user storage (/data/speedbreaker).
+    return "/data";
+#elif defined(_WIN32)
     if (const char* xdg = std::getenv("XDG_DATA_HOME"))
         return xdg;
     std::filesystem::path local = platform::GetKnownFolder(platform::KnownFolder::LocalAppData);
@@ -97,7 +100,9 @@ inline std::filesystem::path UserDataBase()
 
 inline std::filesystem::path CacheBase()
 {
-#ifdef _WIN32
+#ifdef __PROSPERO__
+    return UserDataBase();  // (HomeCachePath adds speedbreaker/cache)
+#elif defined(_WIN32)
     if (const char* xdg = std::getenv("XDG_CACHE_HOME"))
         return xdg;
     return UserDataBase();  // (GetCachePath adds SpeedBreaker\Cache)
@@ -127,6 +132,9 @@ inline std::filesystem::path HomeUserPath()
 
 inline std::filesystem::path HomeCachePath()
 {
+#ifdef __PROSPERO__
+    return UserDataBase() / CacheFolderName() / "cache";
+#endif
 #ifdef _WIN32
     if (!std::getenv("XDG_CACHE_HOME"))
         return CacheBase() / CacheFolderName() / "Cache";

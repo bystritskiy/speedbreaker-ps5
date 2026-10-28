@@ -27,6 +27,9 @@
 #include <SDL3/SDL.h>
 
 #include <deque>
+#ifdef __PROSPERO__
+#include <ps5_host.h>
+#endif
 
 namespace ui
 {
@@ -854,6 +857,9 @@ namespace ui
     void Tick()
     {
         s_pollAt = SDL_GetTicksNS();
+#ifdef __PROSPERO__
+        ps5::diagnostics::Poll();
+#endif
         UpdateCursor();
 #if defined(__APPLE__) && TARGET_OS_IOS
         // Every frame: SDL's text input or the Files picker can have the

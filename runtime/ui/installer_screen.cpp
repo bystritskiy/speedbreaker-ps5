@@ -136,7 +136,7 @@ namespace ui
                 s_dialogFailed = true;
             }
 #else
-            static const SDL_DialogFileFilter filters[] = { { "Xbox 360 disc image", "iso" }, { "All files", "*" } };
+            static const SDL_DialogFileFilter filters[] = { { PadText("Xbox 360 disc image", "Most Wanted disc image"), "iso" }, { "All files", "*" } };
 #ifdef _WIN32
             // Downloads, where a disc image most likely is (never HOME: Git
             // Bash and MSYS2 set it to their own idea of home).
@@ -384,7 +384,7 @@ namespace ui
             switch (error)
             {
             case Error::NotFound: return "Not found";
-            case Error::NotADiscImage: return "Not an Xbox 360 disc image";
+            case Error::NotADiscImage: return PadText("Not an Xbox 360 disc image", "Not a supported Most Wanted disc image");
             case Error::UnsupportedFormat: return "Unsupported format";
             case Error::TruncatedImage: return "The image is incomplete";
             case Error::CorruptImage: return "The image is damaged";
@@ -1019,7 +1019,7 @@ namespace ui
             return;
         }
         TitleText("SpeedBreaker");
-        ImGui::TextDisabled("First-time setup for Need for Speed: Most Wanted (Xbox 360)");
+        ImGui::TextDisabled("%s", PadText("First-time setup for Need for Speed: Most Wanted (Xbox 360)", "First-time setup for Need for Speed: Most Wanted on PS5"));
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
@@ -1040,8 +1040,10 @@ namespace ui
         case Page::Choose:
         {
             const bool inert = PickerShown();  // nothing acts while a Files picker is up
-            ImGui::TextWrapped("The game is installed from your own copy: an Xbox 360 disc image (.iso) or the files "
-                               "extracted from one. No game data comes with this port.");
+            ImGui::TextWrapped("%s", PadText("The game is installed from your own copy: an Xbox 360 disc image (.iso) or the files "
+                               "extracted from one. No game data comes with this port.",
+                               "Install from your own supported Most Wanted (2005) disc image (.iso) or its extracted files. "
+                               "No game data comes with this port."));
             if (!st.notice.empty())
             {
                 PushAccentText();
@@ -1411,6 +1413,8 @@ namespace ui
             ImGui::TextDisabled("In game, press View + Menu on a controller, or tap with three fingers, to open the settings.");
 #elif defined(__APPLE__)
             ImGui::TextDisabled("In game, F1 or Cmd+, (or Back + Start on a controller) opens the settings.");
+#elif defined(__PROSPERO__)
+            ImGui::TextDisabled("In game, press Touchpad + Options to open the settings.");
 #else
             ImGui::TextDisabled("In game, F1 (or Back + Start on a controller) opens the settings.");
 #endif

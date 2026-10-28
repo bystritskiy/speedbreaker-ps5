@@ -263,6 +263,11 @@ namespace
         isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR] & 2) != 0;
 #elif defined(__linux__) && defined(__aarch64__)
         isWrite = FaultWasWrite(static_cast<ucontext_t*>(context));
+#elif defined(__PROSPERO__)
+        // FreeBSD's mcontext, past the PS5's 48 extra bytes (the payload SDK's
+        // ucontext_t has them): the page-fault error code, bit 1 a write.
+        static_assert(offsetof(ucontext_t, uc_mcontext) == 64, "PS5 ucontext layout");
+        isWrite = (static_cast<ucontext_t*>(context)->uc_mcontext.mc_err & 2) != 0;
 #else
         (void)context;
 #endif
@@ -272,6 +277,8 @@ namespace
         writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #elif defined(__linux__) && defined(__aarch64__)
         writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext.pc);
+#elif defined(__PROSPERO__)
+        writewatch::t_faultPc = reinterpret_cast<const void*>(static_cast<ucontext_t*>(context)->uc_mcontext.mc_rip);
 #endif
         if ((sig == SIGSEGV || sig == SIGBUS) && writewatch::HandleFault(info->si_addr, isWrite))
             return;

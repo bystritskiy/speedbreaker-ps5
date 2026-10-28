@@ -404,7 +404,11 @@ uint32_t XamContentGetDeviceData(uint32_t DeviceID, XDEVICE_DATA* pDeviceData)
     pDeviceData->DeviceType = XCONTENTDEVICETYPE_HDD;
     pDeviceData->ulDeviceBytes = 0x10000000;
     pDeviceData->ulDeviceFreeBytes = 0x10000000;
+    #ifdef __PROSPERO__
+    const char* name = "Saved Data";
+#else
     const char* name = "Hard Drive";
+#endif
     for (size_t i = 0; i <= strlen(name); i++)
         pDeviceData->wszName[i] = uint16_t(name[i]);
 
@@ -436,7 +440,11 @@ uint32_t XamContentGetDeviceName(uint32_t deviceId, be<uint16_t>* name, uint32_t
 {
     if ((deviceId & 0xFFFF) != 1)
         return XAM_ERROR_DEVICE_NOT_CONNECTED;
+    #ifdef __PROSPERO__
+    const char* text = "Saved Data";
+#else
     const char* text = "Hard Drive";
+#endif
     size_t n = strlen(text);
     if (capacity < n + 1)
         return XAM_ERROR_INSUFFICIENT_BUFFER;

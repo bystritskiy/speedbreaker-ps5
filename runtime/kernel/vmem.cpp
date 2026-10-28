@@ -17,6 +17,13 @@ namespace vmem
         // Windows: decommit and commit again (platform/memory.h). Its pages
         // are 4 KB, a guest page, so every range is whole host pages.
         return platform::ResetPrivatePages(host, bytes);
+#elif defined(__PROSPERO__)
+        // SpeedBreaker PS5: guest memory is direct memory (kernel/memory.cpp);
+        // an anonymous mapping over it would leave the direct pool for the
+        // small flexible budget. ResetHostRange clears the range instead.
+        (void)host;
+        (void)bytes;
+        return false;
 #else
         return mmap(host, bytes, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != MAP_FAILED;
 #endif

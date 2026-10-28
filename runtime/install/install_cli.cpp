@@ -6,6 +6,7 @@
 #include "portable_switch.h"
 
 #include <user/paths.h>
+#include <user/platform_labels.h>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -253,7 +254,7 @@ namespace install
                     printf("         %s: %s\n", ErrorName(image.status.error), image.status.message.c_str());
             }
             if (images.empty())
-                printf("No Xbox 360 disc images found.\n");
+                printf("%s", platform_labels::Text("No Xbox 360 disc images found.\n", "No supported game disc images found.\n"));
             return images.empty() ? 1 : 0;
         }
 

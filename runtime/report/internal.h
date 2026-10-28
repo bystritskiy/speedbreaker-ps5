@@ -12,7 +12,9 @@
 namespace report::detail
 {
     // How a toast tells the player to reach Save Bug Report.
-#ifdef __APPLE__
+#ifdef __PROSPERO__
+    constexpr const char* kSaveBugReportHint = "Settings (Touchpad + Options) > Advanced > Save Bug Report";
+#elif defined(__APPLE__)
     constexpr const char* kSaveBugReportHint = "Settings (F1, Cmd+, or Back + Start) > Advanced > Save Bug Report";
 #else
     constexpr const char* kSaveBugReportHint = "Settings (F1, or Back + Start) > Advanced > Save Bug Report";

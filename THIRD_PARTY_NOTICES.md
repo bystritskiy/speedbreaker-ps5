@@ -49,6 +49,25 @@ source releases by [`scripts/macos/build_deps.sh`](scripts/macos/build_deps.sh),
 the app supports; the app's `Contents/Resources/licenses/README.txt` names the version, source archive
 and SHA-256 of each, next to its license files.
 
+## In the PS5 app
+
+The PS5 app (`port/ps5`) is one statically linked `eboot.bin` beside `sce_module/libc.prx`. Besides
+what every platform compiles in (above), FFmpeg, SDL3 (without HIDAPI) and glslang, built for the
+console by `port/ps5/tools/build-deps.sh`, it holds:
+
+| Project | What it does here | License | Text |
+|---|---|---|---|
+| **PS5_Vulkan**: Copyright (C) 2026 BlackBearReloaded, Mihawk-99 ([github.com/mihawk-99/PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan)) | The app's start-up code (`tooling/native/app_crt.cpp`), the generated `sce_module/libc.prx` (no code of a console module, as its `runtime/README.md` says) and the converter and signer `ps5-native-tool`, which builds `eboot.bin` (not shipped). | GPL-3.0-or-later | [`LICENSES/GPL-3.0.txt`](LICENSES/GPL-3.0.txt) |
+| **PS5 payload SDK**: ps5-payload-dev and contributors, with Mihawk-99's PS5 platform layer ([github.com/mihawk-99/PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK)) | Its C library, thread library and module stubs, and the platform layer (memory, logging, machine context). | GPL-3.0-or-later; its `include/freebsd` headers: BSD | [`LICENSES/GPL-3.0.txt`](LICENSES/GPL-3.0.txt) |
+| **Mesa** 26.2.0 (RADV, ACO, NIR and Mesa's Vulkan runtime), with Mihawk-99's PS5 winsys ([github.com/mihawk-99/PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa)) | The Vulkan driver, linked in whole. | MIT (individual files may name others; Mesa's `licenses/` folder) | [`LICENSES/Mesa-MIT.txt`](LICENSES/Mesa-MIT.txt) |
+| **LLVM** 18: libc++, libc++abi, libunwind and compiler-rt's builtins | The C++ runtime and the compiler's helper functions, from the payload SDK and Ubuntu's `libclang-rt-18-dev`. | Apache-2.0 WITH LLVM-exception | [`LICENSES/LLVM-Apache-2.0-WITH-LLVM-exception.txt`](LICENSES/LLVM-Apache-2.0-WITH-LLVM-exception.txt) |
+
+`port/ps5/tools/setup-ps5-vulkan.sh` pins the three forks' revisions. The app folder's `licenses/`
+holds this file, `COPYING`, `NOTICE` and `LICENSES/`, and its `VERSION` names the commit it was
+built from. The DualSense artwork and button symbols in `port/ps5/assets` are this port's own
+drawings, not Sony's artwork; PlayStation, PS5, DualSense and the PlayStation Shapes are
+trademarks of Sony Interactive Entertainment Inc.
+
 ## Source code of the LGPL and GPL parts
 
 FFmpeg and libmspack (LGPL-2.1) are compiled into every download, and the SteamOS x86-64 download
@@ -62,6 +81,10 @@ page, as `SpeedBreaker-<version>-third-party-source.tar.xz`:
 - libmspack, as XenonRecomp's pinned submodule has it;
 - the GNU C Library and GCC, at the Arch Linux package versions the x86-64 download's
   `licenses/README.txt` names, with Arch's build files and patches for them.
+
+The PS5 fork's releases ([github.com/bystritskiy/speedbreaker-ps5](https://github.com/bystritskiy/speedbreaker-ps5/releases)) add `SpeedBreaker-<version>-ps5-third-party-source.tar.xz`
+(`port/ps5/tools/third-party-source.sh`): FFmpeg and libmspack as above, and PS5_Vulkan,
+PS5_PayloadSDK and PS5_Mesa at the pinned revisions.
 
 If it is ever missing, ask through the project's [issue tracker](https://github.com/SpeedBreakerProject/speedbreaker/issues):
 for at least three years after a release, its copy is provided at no charge.
