@@ -15,8 +15,8 @@ namespace ps5::pad
     // (`level`: 0 off, 1 light, 2 medium, 3 strong): the accelerator (R2)
     // pushes back steadily, the brake (L2) more and more along its travel,
     // like a pedal. Trigger Effects (`effects`): the accelerator also shakes
-    // with the game's rumble (crashes, bumps, rough ground) and buzzes with
-    // nitrous. Sent when what the triggers should do changes, and again
+    // with the game's rumble (crashes, bumps, rough ground), buzzes with
+    // nitrous and kicks on a manual gear change. Sent when what the triggers should do changes, and again
     // whenever the pad is reopened. Main thread, once per frame (hid::Update).
     void SetTriggers(int level, bool effects);
 }

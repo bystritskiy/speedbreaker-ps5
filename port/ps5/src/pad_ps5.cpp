@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -111,12 +112,19 @@ namespace ps5::pad
         //   kRumbleThreshold shakes the accelerator, as strongly as the game
         //   rumbles: low notes for the big motor, high ones for the small;
         // - nitrous (Circle, the 360's B) held with the accelerator down
-        //   buzzes the accelerator harder.
+        //   buzzes the accelerator harder;
+        // - a gear change (the right stick flicked up or down, the game's
+        //   manual shift) kicks the accelerator once, briefly. Automatic
+        //   shifts aren't seen: the game doesn't tell us.
         // First guesses, to be tuned on a console: the log's "[ps5] triggers:
         // game rumble peak" line gives what the game sends.
         constexpr float kRumbleThreshold = 0.35f;
         constexpr uint32_t kNitrous = 0x2000;  // kCircle
         constexpr uint8_t kNitrousAccelerator = 77;  // r2 above 30%
+        // The right stick past this far from the centre (of 128) is a shift,
+        // and back within kShiftRelease ready for the next one.
+        constexpr int kShiftPress = 80, kShiftRelease = 40;
+        constexpr uint32_t kShiftKickMs = 110;
         // A change is sent at most this often (ms), but a stop or start of
         // an effect straight away.
         constexpr uint32_t kSendInterval = 50;
@@ -132,6 +140,8 @@ namespace ps5::pad
         uint16_t s_rumbleLow = 0, s_rumbleHigh = 0;
         uint32_t s_buttons = 0;
         uint8_t s_r2 = 0;
+        bool s_shiftHeld = false;
+        Uint64 s_shiftKickUntil = 0;  // SDL ticks
         // What the open pad was sent (sentValid false: nothing yet).
         TriggerEffectParam s_sent{};
         bool s_sentValid = false;
@@ -166,7 +176,13 @@ namespace ps5::pad
                 return param;
             const float low = s_rumbleLow / 65535.0f, high = s_rumbleHigh / 65535.0f;
             const float rumble = low > high ? low : high;
-            if ((s_buttons & kNitrous) && s_r2 > kNitrousAccelerator)
+            if (SDL_GetTicks() < s_shiftKickUntil)
+            {
+                // A short hard jolt, low in the trigger's travel, as the gear goes in.
+                accel.mode = kTriggerEffectVibration;
+                accel.vibration = { 0, 8, 30 };
+            }
+            else if ((s_buttons & kNitrous) && s_r2 > kNitrousAccelerator)
             {
                 accel.mode = kTriggerEffectVibration;
                 accel.vibration = { 2, Clamp8(5 + s_triggerLevel, 1, 8), 60 };
@@ -283,6 +299,14 @@ namespace ps5::pad
                         ok = data.connected != 0;
                     s_buttons = ok ? data.buttons : 0;
                     s_r2 = ok ? data.r2 : 0;
+                    const int shift = ok ? std::abs(int(data.ry) - 128) : 0;
+                    if (!s_shiftHeld && shift > kShiftPress)
+                    {
+                        s_shiftHeld = true;
+                        s_shiftKickUntil = SDL_GetTicks() + kShiftKickMs;
+                    }
+                    else if (s_shiftHeld && shift < kShiftRelease)
+                        s_shiftHeld = false;
                 }
             }
             if (!ok)
