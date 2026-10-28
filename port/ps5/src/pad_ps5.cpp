@@ -63,20 +63,23 @@ namespace ps5::pad
         // ScePadTriggerEffectParam, as the public reverse-engineered headers
         // lay it out (not yet checked on a console): a mask of the triggers
         // it sets, then one command per trigger, L2 first. A command's data
-        // is a 48-byte union; Feedback's is a start position (0-9, of the
-        // trigger's travel) and a strength (1-8).
+        // is a 48-byte union. Positions are 0-9 of the trigger's travel,
+        // strengths and amplitudes 1-8, a frequency in Hz.
         enum : uint8_t { kTriggerL2 = 0x01, kTriggerR2 = 0x02 };
-        enum : uint32_t { kTriggerEffectOff = 0, kTriggerEffectFeedback = 1 };
+        enum : uint32_t
+        {
+            kTriggerEffectOff = 0, kTriggerEffectFeedback = 1, kTriggerEffectVibration = 3,
+            kTriggerEffectSlopeFeedback = 5,
+        };
         struct TriggerEffectCommand
         {
             uint32_t mode;
             uint8_t padding[4];
             union
             {
-                struct
-                {
-                    uint8_t position, strength;
-                } feedback;
+                struct { uint8_t position, strength; } feedback;
+                struct { uint8_t position, amplitude, frequency; } vibration;
+                struct { uint8_t startPosition, endPosition, startStrength, endStrength; } slope;
                 uint8_t data[48];
             };
         };
@@ -89,52 +92,131 @@ namespace ps5::pad
         static_assert(sizeof(TriggerEffectCommand) == 56, "libScePad trigger effect command ABI");
         static_assert(sizeof(TriggerEffectParam) == 120, "libScePad trigger effect ABI");
 
-        // Each level's feedback, { position, strength } (strength 0: off):
-        // the brake firmer than the accelerator.
-        struct Feedback
-        {
-            uint8_t position, strength;
-        };
+        // Trigger Resistance's levels: the accelerator's steady strength, and
+        // the brake's, which builds up along its travel like a pedal's
+        // (start, end).
         struct Level
         {
-            Feedback accelerator, brake;
+            uint8_t accelerator, brakeStart, brakeEnd;
         };
         constexpr Level kLevels[] = {
-            { { 0, 0 }, { 0, 0 } },  // Off
-            { { 1, 2 }, { 1, 4 } },  // Light
-            { { 1, 3 }, { 1, 6 } },  // Medium
-            { { 1, 5 }, { 1, 8 } },  // Strong
+            { 0, 0, 0 },  // Off
+            { 2, 1, 4 },  // Light
+            { 3, 2, 6 },  // Medium
+            { 5, 3, 8 },  // Strong
         };
+
+        // Trigger Effects (the dynamic part, on top of the resistance):
+        // - the game's own rumble (crashes, bumps, kerbs, rough ground) above
+        //   kRumbleThreshold shakes the accelerator, as strongly as the game
+        //   rumbles: low notes for the big motor, high ones for the small;
+        // - nitrous (Circle, the 360's B) held with the accelerator down
+        //   buzzes the accelerator harder.
+        // First guesses, to be tuned on a console: the log's "[ps5] triggers:
+        // game rumble peak" line gives what the game sends.
+        constexpr float kRumbleThreshold = 0.35f;
+        constexpr uint32_t kNitrous = 0x2000;  // kCircle
+        constexpr uint8_t kNitrousAccelerator = 77;  // r2 above 30%
+        // A change is sent at most this often (ms), but a stop or start of
+        // an effect straight away.
+        constexpr uint32_t kSendInterval = 50;
 
         std::mutex s_mutex;
         int s_handle = -1;
         bool s_ownHandle = false;
         time_t s_nextOpen = 0;
         SDL_JoystickID s_id = 0;
-        int s_triggerLevel = 0;      // what Settings asks for
-        int s_triggerLevelSent = -1;  // what the open pad was sent (-1: nothing yet)
+        // What Settings asks for, and what the game and the pad say now.
+        int s_triggerLevel = 0;
+        bool s_triggerEffects = false;
+        uint16_t s_rumbleLow = 0, s_rumbleHigh = 0;
+        uint32_t s_buttons = 0;
+        uint8_t s_r2 = 0;
+        // What the open pad was sent (sentValid false: nothing yet).
+        TriggerEffectParam s_sent{};
+        bool s_sentValid = false;
+        Uint64 s_sentAt = 0;
+        // The game's strongest rumble in the last 5 s, for the log.
+        uint16_t s_peakLow = 0, s_peakHigh = 0;
+        Uint64 s_peakSince = 0;
 
-        void SetFeedback(TriggerEffectCommand& c, Feedback f)
+        uint8_t Clamp8(int v, int lo, int hi)
         {
-            c.mode = f.strength ? kTriggerEffectFeedback : kTriggerEffectOff;
-            c.feedback.position = f.position;
-            c.feedback.strength = f.strength;
+            return uint8_t(v < lo ? lo : v > hi ? hi : v);
         }
 
-        // Sends the level asked for, if the open pad doesn't have it yet.
-        void SendTriggersLocked()
+        TriggerEffectParam DesiredLocked()
         {
-            if (s_handle < 0 || s_triggerLevelSent == s_triggerLevel)
-                return;
             TriggerEffectParam param{};
             param.triggerMask = kTriggerL2 | kTriggerR2;
-            SetFeedback(param.command[0], kLevels[s_triggerLevel].brake);
-            SetFeedback(param.command[1], kLevels[s_triggerLevel].accelerator);
-            const int result = scePadSetTriggerEffect(s_handle, &param);
-            fprintf(stderr, "[ps5] trigger resistance %d: scePadSetTriggerEffect %s (0x%08x)\n", s_triggerLevel,
-                result >= 0 ? "ok" : "failed", unsigned(result));
-            // A failure isn't retried every frame: the next change or reopen tries again.
-            s_triggerLevelSent = s_triggerLevel;
+            const Level& l = kLevels[s_triggerLevel];
+            TriggerEffectCommand& brake = param.command[0];
+            TriggerEffectCommand& accel = param.command[1];
+            if (l.brakeEnd)
+            {
+                brake.mode = kTriggerEffectSlopeFeedback;
+                brake.slope = { 1, 9, l.brakeStart, l.brakeEnd };
+            }
+            if (l.accelerator)
+            {
+                accel.mode = kTriggerEffectFeedback;
+                accel.feedback = { 1, l.accelerator };
+            }
+            if (!s_triggerEffects)
+                return param;
+            const float low = s_rumbleLow / 65535.0f, high = s_rumbleHigh / 65535.0f;
+            const float rumble = low > high ? low : high;
+            if ((s_buttons & kNitrous) && s_r2 > kNitrousAccelerator)
+            {
+                accel.mode = kTriggerEffectVibration;
+                accel.vibration = { 2, Clamp8(5 + s_triggerLevel, 1, 8), 60 };
+            }
+            else if (rumble > kRumbleThreshold)
+            {
+                accel.mode = kTriggerEffectVibration;
+                accel.vibration = { 1, Clamp8(int(rumble * 8.0f + 0.5f), 1, 8), uint8_t(high > low ? 55 : 25) };
+            }
+            return param;
+        }
+
+        // Sends what the triggers should do now, if the open pad doesn't have it.
+        void SendTriggersLocked(bool force = false)
+        {
+            if (s_handle < 0)
+                return;
+            const Uint64 now = SDL_GetTicks();
+            if (s_triggerEffects)
+            {
+                if (!s_peakSince)
+                    s_peakSince = now;
+                if (s_rumbleLow > s_peakLow) s_peakLow = s_rumbleLow;
+                if (s_rumbleHigh > s_peakHigh) s_peakHigh = s_rumbleHigh;
+                if (now - s_peakSince >= 5000)
+                {
+                    if (s_peakLow || s_peakHigh)
+                        fprintf(stderr, "[ps5] triggers: game rumble peak low %.2f, high %.2f\n", s_peakLow / 65535.0, s_peakHigh / 65535.0);
+                    s_peakLow = s_peakHigh = 0;
+                    s_peakSince = now;
+                }
+            }
+            const TriggerEffectParam want = DesiredLocked();
+            if (s_sentValid && memcmp(&want, &s_sent, sizeof want) == 0)
+                return;
+            const bool modeChanged = !s_sentValid || want.command[0].mode != s_sent.command[0].mode
+                || want.command[1].mode != s_sent.command[1].mode;
+            if (!force && !modeChanged && now - s_sentAt < kSendInterval)
+                return;
+            const int result = scePadSetTriggerEffect(s_handle, &want);
+            // Every send while an effect runs would be a line a frame: only
+            // the changes of mode, and failures.
+            if (modeChanged || result < 0)
+                fprintf(stderr, "[ps5] triggers: resistance %d, effects %s, L2 mode %u, R2 mode %u: scePadSetTriggerEffect %s (0x%08x)\n",
+                    s_triggerLevel, s_triggerEffects ? "on" : "off", unsigned(want.command[0].mode), unsigned(want.command[1].mode),
+                    result >= 0 ? "ok" : "failed", unsigned(result));
+            // A failure isn't retried every frame: the next change tries again.
+            s_sent = want;
+            s_sentValid = true;
+            s_sentAt = now;
         }
 
         // Opens the initial user's pad (or takes the handle the system has).
@@ -157,8 +239,8 @@ namespace ps5::pad
                 return false;
             scePadSetVibrationMode(s_handle, 2);
             fprintf(stderr, "[ps5] pad opened (user %d, handle %d)\n", user, s_handle);
-            s_triggerLevelSent = -1;
-            SendTriggersLocked();
+            s_sentValid = false;
+            SendTriggersLocked(true);
             return true;
         }
 
@@ -199,6 +281,8 @@ namespace ps5::pad
                         CloseLocked();
                     else
                         ok = data.connected != 0;
+                    s_buttons = ok ? data.buttons : 0;
+                    s_r2 = ok ? data.r2 : 0;
                 }
             }
             if (!ok)
@@ -228,6 +312,8 @@ namespace ps5::pad
             (void)userdata;
             const uint8_t motors[2] = { uint8_t(low >> 8), uint8_t(high >> 8) };  // large, small
             std::lock_guard lock(s_mutex);
+            s_rumbleLow = low;
+            s_rumbleHigh = high;
             return s_handle >= 0 && scePadSetVibration(s_handle, motors) >= 0;
         }
     }
@@ -265,15 +351,17 @@ namespace ps5::pad
         if (s_handle >= 0)
             scePadSetVibration(s_handle, stop);
         s_triggerLevel = 0;
-        SendTriggersLocked();
+        s_triggerEffects = false;
+        SendTriggersLocked(true);
         CloseLocked();
     }
 
-    void SetTriggerResistance(int level)
+    void SetTriggers(int level, bool effects)
     {
         level = level < 0 ? 0 : level >= int(std::size(kLevels)) ? int(std::size(kLevels)) - 1 : level;
         std::lock_guard lock(s_mutex);
         s_triggerLevel = level;
+        s_triggerEffects = effects;
         SendTriggersLocked();
     }
 }

@@ -65,6 +65,7 @@ namespace settings
         TriggerDeadzone,
         Vibration,
         TriggerResistance,  // PS5 only: the DualSense's adaptive triggers (port/ps5/src/pad_ps5.cpp)
+        TriggerEffects,     // PS5 only: the same triggers, moved by the game's rumble and nitrous
         // Wheel (the [wheel] table): a USB steering wheel as the pad
         // (hid/wheel_map.h). The page shows itself only while one is
         // connected; the four axis options are hidden, and hold what

@@ -11,12 +11,14 @@ namespace ps5::pad
     void Attach();
     // Stops the motors, frees the triggers and closes the pad.
     void Shutdown();
-    // Settings > Input > Trigger Resistance (0 off, 1 light, 2 medium, 3
-    // strong): a steady push back on the triggers, the accelerator (R2)
-    // light and the brake (L2) firmer, as driving games set them. Sent once
-    // per change, and again whenever the pad is reopened. Main thread, once
-    // per frame (hid::Update).
-    void SetTriggerResistance(int level);
+    // The adaptive triggers, as Settings > Input asks. Trigger Resistance
+    // (`level`: 0 off, 1 light, 2 medium, 3 strong): the accelerator (R2)
+    // pushes back steadily, the brake (L2) more and more along its travel,
+    // like a pedal. Trigger Effects (`effects`): the accelerator also shakes
+    // with the game's rumble (crashes, bumps, rough ground) and buzzes with
+    // nitrous. Sent when what the triggers should do changes, and again
+    // whenever the pad is reopened. Main thread, once per frame (hid::Update).
+    void SetTriggers(int level, bool effects);
 }
 
 namespace ps5::diagnostics

@@ -103,7 +103,7 @@ namespace settings
         // Screen Resolution scales an iOS view (Core Animation scales it up
         // to the screen); elsewhere the window's size is the player's.
         constexpr bool kPresentScaleHidden = !kFullscreenHidden;
-        // The DualSense's adaptive triggers are set on the PS5 only (port/ps5/src/pad_ps5.cpp).
+        // The DualSense's adaptive triggers (Trigger Resistance, Trigger Effects) are set on the PS5 only (port/ps5/src/pad_ps5.cpp).
 #ifdef __PROSPERO__
         constexpr bool kTriggerResistanceHidden = false;
 #else
@@ -339,8 +339,12 @@ namespace settings
               .env = "NFSMW_VIBRATION", .defaultValue = 1 },
             { .id = Id::TriggerResistance, .category = Category::Input, .type = Type::Enum, .apply = Apply::Live, .hidden = kTriggerResistanceHidden,
               .table = "input", .key = "trigger_resistance", .label = "Trigger Resistance",
-              .description = "The DualSense's triggers push back, as in modern driving games: the accelerator lightly, the brake more firmly.",
+              .description = "The DualSense's triggers push back, as in modern driving games: the accelerator lightly, the brake more and more as you press it, like a pedal.",
               .env = "NFSMW_TRIGGER_RESISTANCE", .defaultValue = 1, .entries = kTriggerResistanceEntries },
+            { .id = Id::TriggerEffects, .category = Category::Input, .type = Type::Bool, .apply = Apply::Live, .hidden = kTriggerResistanceHidden,
+              .table = "input", .key = "trigger_effects", .label = "Trigger Effects",
+              .description = "The accelerator shakes with the game's knocks (crashes, bumps, rough ground) and buzzes while nitrous is on.",
+              .env = "NFSMW_TRIGGER_EFFECTS", .defaultValue = 1 },
             // Wheel (Settings > Wheel; hid/wheel_map.h and hid/wheel.cpp
             // read them). The page shows only while a wheel is connected.
             { .id = Id::Wheel, .category = Category::Wheel, .type = Type::Bool, .apply = Apply::Live,
