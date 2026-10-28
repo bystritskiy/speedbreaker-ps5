@@ -1,4 +1,4 @@
-// SpeedBreaker PS5: native callout composition and scoped disc-label correction.
+// SpeedBreaker PS5: the loading screens' DualSense diagram: texture recognition and leader lines.
 #pragma once
 #include <algorithm>
 #include <array>

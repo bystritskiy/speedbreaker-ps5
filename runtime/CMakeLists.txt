@@ -140,6 +140,10 @@ target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gene
 # CHANGELOG.md, from its "## v<version>" heading to the next "## " one,
 # compiled in (generated/whats_new.inc). An edit of CHANGELOG.md reconfigures.
 set(SB_CHANGELOG ${CMAKE_SOURCE_DIR}/CHANGELOG.md)
+if(SB_PS5)
+    # SpeedBreaker PS5: the PS5 build's own notes, not the other platforms'.
+    set(SB_CHANGELOG ${CMAKE_SOURCE_DIR}/port/ps5/CHANGELOG.md)
+endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SB_CHANGELOG})
 set(SB_WHATS_NEW "")
 if(EXISTS ${SB_CHANGELOG})

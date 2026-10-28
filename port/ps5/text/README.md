@@ -1,6 +1,6 @@
 # PS5 presentation text
 
-`english.json` contains reviewed English copy for saves, profiles and the
+`english.json` contains this port's English copy for saves, profiles and the
 unavailable online features. Online menu labels are neutral; error/sign-in
 messages explicitly describe this port's offline state. No PSN functionality is
 claimed. Physical Start/Back labels use Options/Touchpad.
@@ -29,10 +29,12 @@ read-only disc file reads. The first read that touches a slot reads it whole
 from the player's archive, checks its hash and applies the edits; a read is
 changed only where its bytes equal the disc's original. Partial reads and
 strings spanning reads are supported. Unrecognized archive names,
-versions and mismatched bytes pass through. This supersedes the original
-single English `Xbox Guide` patch in controls_artwork.h.
+versions and mismatched bytes pass through.
 
-Regenerate and validate with locally extracted resources:
+The build needs none of this: `text_patches.h` is committed. To change the
+text, regenerate and validate it from your own disc's resources, extracted
+from its archives (`LANGUAGES_*.BIN` and the four `GLOBAL_*MEMORYFILE.BIN`
+files, named after their ZDIR paths with `_` for `\`):
 
 ```sh
 python3 port/ps5/tools/generate-text-patches.py --resources /path/to/ui-resources --zdir game/files/NFS/ZDIR.BIN

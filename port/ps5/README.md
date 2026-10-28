@@ -27,10 +27,9 @@ supported executable of the other platforms). Either
   of a USB drive, and let the first-run installer install it.
 
 The FTP uploader verifies the source against the USA manifest, reads back and
-hashes every remote file, and writes `.nfsmw-install` last. Files copied by an
-older uploader without that marker are not detected as an installed game;
-rerun the current uploader to verify and register them. A full readback moves
-7.1 GB over the network even when no file needs uploading.
+hashes every remote file, and writes `.nfsmw-install` last: the game counts the
+files as installed only with that marker. A full readback moves 7.1 GB over the
+network even when no file needs uploading.
 
 Saves, settings, logs (`logs/`) and the shader cache (`cache/`) are in
 `/data/speedbreaker/`.
@@ -129,6 +128,12 @@ other save data.
   while changing CPU permissions; PS5 protection changes affect both.
 - **Faults:** the write watch's SIGSEGV handler reads the PS5's mcontext
   (48 bytes later than FreeBSD's; the SDK's `ucontext_t` has them).
+- **Presentation:** DualSense button symbols and loading-screen artwork
+  replace the Xbox ones when the game loads them (`assets/README.md`), and
+  the PlayStation wording is edited into the disc's text as it is read
+  (`text/README.md`). The settings, installer and notices use the PS5's
+  names through `runtime/user/platform_labels.h`; the What's new note is
+  `CHANGELOG.md` here.
 - **Logging:** PS5 replaces the `stderr` stream with an unbuffered pipe
   stream; a native title cannot redirect descriptor 2 with `dup2`. The
   session writer preserves the same timestamped file and recent-output ring.

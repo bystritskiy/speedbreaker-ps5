@@ -1,4 +1,4 @@
-// Original DualSense cutout plus native callout lines; loaded once on demand.
+// The DualSense cutout (assets/dualsense.bgra) plus native leader lines; loaded once on demand.
 #include "ps5_host.h"
 #include "controls_artwork.h"
 #include <array>

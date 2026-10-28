@@ -9,8 +9,9 @@ The port changes the delayed-cleanup condition to include `__PROSPERO__`.
 PS5's platform implementation of `__cxa_thread_atexit_impl` runs C++ TLS
 destructors from a pthread key. The normal non-Bionic emutls implementation
 frees the TLS storage on the first key-cleanup round, before that callback
-uses it. The first guest thread to exit after the opening frames then
-crashed in `mspace_free`, called by a destructor with a freed object.
+uses it. Without the change, the first guest thread to exit after the
+opening frames crashes in `mspace_free`, called by a destructor with a freed
+object.
 
 As on Bionic, keep the emutls array registered for one additional cleanup
 round. C++ destructors run while their objects are still alive, and the
@@ -18,8 +19,8 @@ next round frees the storage. This is linked as an explicit object before
 the builtins archive, so its default zero-delay implementation is not used.
 
 `tests/ps5_emutls_test.c` checks that pthread-key cleanup can use the TLS
-object, and that its storage is freed afterwards. It fails with the
-original zero-delay implementation on the development host.
+object, and that its storage is freed afterwards; with the original
+zero-delay implementation it fails.
 
 From the repository root, using the host's Clang and AddressSanitizer:
 

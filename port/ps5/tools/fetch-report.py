@@ -2,8 +2,8 @@
 """Fetch PS5 session logs, or request the running game's complete bug-report ZIP.
 
 The game consumes /data/speedbreaker/.request-bug-report on its UI thread.
-The report includes the current frame, settings and diagnostics; no keyboard,
-ps5debug attachment or remote launch is required. The app must be running.
+The report includes the current frame, settings and diagnostics; nothing on
+the console needs to be touched. The app must be running.
 """
 import argparse
 import ftplib
