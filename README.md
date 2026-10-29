@@ -107,10 +107,11 @@ even its PlayStation button text is made at run time from your disc's own text.
 - A **PS5 that runs homebrew**, with **ShadowMountPlus** (it puts folder apps on the home screen)
   and an **FTP server** (ftpsrv, port 2121) for copying files. This is homebrew, not a
   PlayStation Store app.
-- Your own **USA (NTSC-U) Xbox 360 disc** of *Need for Speed: Most Wanted* (2005), extracted: its
-  `default.xex` has SHA-256 `aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c`.
-  Other regions aren't supported on the PS5 yet.
-- About 7.5 GB free on the console for the game files.
+- Your own **USA (NTSC-U) Xbox 360 disc** of *Need for Speed: Most Wanted* (2005), as a disc image
+  (`.iso`) or extracted: its `default.xex` has SHA-256
+  `aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c`. Other regions aren't
+  supported on the PS5 yet.
+- About 8 GB free on the console for the disc image (7.5 GB for extracted files).
 
 ## Install
 
@@ -118,17 +119,19 @@ even its PlayStation button text is made at run time from your disc's own text.
    unpack it, and copy the `PPSA90505` folder to `/data/homebrew/` on the console. The
    **SpeedBreaker** tile appears on the home screen. Or install it from
    [RecompStore](https://recompstore.com/game/PPSA90505).
-2. **Your game files.** Extract your disc image (for example with extract-xiso) and copy
-   `default.xex`, `NFS/` and `Movies/` (49 files, 7.1 GB) to `/data/speedbreaker/game/`. The
-   uploader checks every file against the USA disc, reads each one back, and marks the game as
-   installed only when all of them match:
+2. **Your disc.** Copy the disc image (`.iso`) to `/data/speedbreaker/` over FTP (or to `/data/`
+   or the top of a USB drive). Start the tile, choose the image and press **Install**: every file
+   is checked against the USA disc, which takes under a minute, and nothing is copied. The game
+   is played from the image, so keep it where it is.
+
+   Or extract the image (for example with extract-xiso) and copy `default.xex`, `NFS/` and
+   `Movies/` (49 files, 7.1 GB) to `/data/speedbreaker/game/`. The uploader checks every file
+   against the USA disc, reads each one back, and marks the game as installed only when all of
+   them match:
 
    ```sh
    python3 -I port/ps5/tools/upload-game.py --addr <console IP> <extracted disc folder>
    ```
-
-   Or put the disc image (`.iso`) in `/data/speedbreaker/`, `/data/` or the top of a USB drive,
-   and the first start offers to install it.
 3. **Play.** Start the tile. The first race compiles its shaders; they are kept for next time.
 
 **To update,** copy the new `PPSA90505` folder over the old one. Your saves, settings and game
@@ -173,7 +176,8 @@ every setting in full.
 ## Your files
 
 Everything SpeedBreaker writes is in `/data/speedbreaker/`: `settings.toml`, your saves,
-`logs/`, the shader cache (`cache/`) and the installed game (`game/`). The app folder in
+`logs/`, the shader cache (`cache/`), and the disc image with its record (`game-image`) or the
+extracted game (`game/`). The app folder in
 `/data/homebrew/PPSA90505/` holds only the program, its artwork and its licenses.
 
 ## Reporting a bug

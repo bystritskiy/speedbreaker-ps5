@@ -1,6 +1,6 @@
 # SpeedBreaker on PS5: status
 
-What has been tried on a console, and what hasn't. Release 01.000.000, on SpeedBreaker v0.2.0;
+What has been tried on a console, and what hasn't. Release 01.000.001, on SpeedBreaker v0.2.0;
 the build itself is described in [`port/ps5/README.md`](../port/ps5/README.md).
 
 ## Tested on a console
