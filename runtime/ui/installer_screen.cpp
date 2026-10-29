@@ -521,6 +521,18 @@ namespace ui
         std::vector<Destination> destinations;
         size_t chosen = 0;
 
+        // PS5: a disc image is read where it is, not copied (install::UseImage):
+        // the console meters what an app writes, and a copy of the disc
+        // would crawl after its first 2.5 GB.
+        bool InPlace() const
+        {
+#ifdef __PROSPERO__
+            return source && source->Kind() == install::SourceKind::Image;
+#else
+            return false;
+#endif
+        }
+
         // "Choose a folder...": the folder picked (kept across visits to the
         // Confirm page), or the one recorded last time when it isn't one of
         // the others (`exact`: offered as it is, no subfolder).
@@ -566,6 +578,15 @@ namespace ui
         void LoadDestinations()
         {
             destinations.clear();
+            chosen = 0;
+            if (InPlace())
+            {
+                Destination d;
+                d.where = { "Played from the disc image", source->Path(), false };
+                destinations.push_back(std::move(d));
+                destination = source->Path();
+                return;
+            }
             for (auto& where : install::InstallDestinations())
             {
                 Destination d{ where };
@@ -822,9 +843,10 @@ namespace ui
             }
             Go(Page::Installing);
             task = std::async(std::launch::async, [this] {
-                return install::Install(*source, destination, [this](const install::Progress& p) {
+                auto report = [this](const install::Progress& p) {
                     std::lock_guard lock(progressMutex);
-                    if (p.phase == install::Progress::Phase::Copying && copyStart.time_since_epoch().count() == 0)
+                    if ((p.phase == install::Progress::Phase::Copying || p.phase == install::Progress::Phase::Verifying)
+                        && copyStart.time_since_epoch().count() == 0)
                     {
                         copyStart = std::chrono::steady_clock::now();
                         copyStartBytes = p.bytesDone;
@@ -832,7 +854,9 @@ namespace ui
                     progress = p;
                     currentFile.assign(p.currentFile);
                     progress.currentFile = {};
-                }, &cancel);
+                };
+                return InPlace() ? install::UseImage(*source, report, &cancel)
+                                 : install::Install(*source, destination, report, &cancel);
             });
         }
 
@@ -915,8 +939,9 @@ namespace ui
             if (st.result.Ok())
             {
                 installedPath = st.destination;
-                // So the next launch finds it (internal storage clears the record).
-                if (!install::RecordInstallPath(st.destination))
+                // So the next launch finds it (internal storage clears the
+                // record; UseImage recorded the image itself).
+                if (!st.InPlace() && !install::RecordInstallPath(st.destination))
                     fprintf(stderr, "[installer] couldn't record the install location %s\n", st.destination.string().c_str());
                 st.Go(Page::Done);
             }
@@ -1312,10 +1337,19 @@ namespace ui
                     ImGui::TextWrapped("%s", d.regionNote.c_str());
                     PopAccentText();
                 }
-                ImGui::TextDisabled("%s needed", install::FormatSize(d.info.required).c_str());
-                if (d.info.replacing)
-                    ImGui::TextWrapped("Replaces the game already there. DLC and other files you added to it are kept.");
-                ImGui::TextWrapped("This takes a few minutes. Every file is checked against the known-good disc as it is copied.");
+                if (st.InPlace())
+                {
+                    ImGui::TextWrapped("Nothing is copied: the game reads its files from the disc image, so keep the image "
+                        "where it is.");
+                    ImGui::TextWrapped("First every file is checked against the known-good disc, which takes about a minute.");
+                }
+                else
+                {
+                    ImGui::TextDisabled("%s needed", install::FormatSize(d.info.required).c_str());
+                    if (d.info.replacing)
+                        ImGui::TextWrapped("Replaces the game already there. DLC and other files you added to it are kept.");
+                    ImGui::TextWrapped("This takes a few minutes. Every file is checked against the known-good disc as it is copied.");
+                }
             }
             ButtonRowAtBottom();
             // The cursor: Install when it can, else "Choose a folder..." on
@@ -1350,7 +1384,8 @@ namespace ui
                 copyStart = st.copyStart;
                 copyStartBytes = st.copyStartBytes;
             }
-            const char* phase = p.phase == install::Progress::Phase::Finalizing ? "Finishing..." : "Installing...";
+            const char* phase = p.phase == install::Progress::Phase::Finalizing ? "Finishing..."
+                : st.InPlace() ? "Checking the disc image..." : "Installing...";
             PushAccentText();
             ImGui::TextUnformatted(phase);
             PopAccentText();
@@ -1406,8 +1441,17 @@ namespace ui
             ImGui::TextUnformatted("Installed");
             PopAccentText();
             ImGui::Spacing();
-            ImGui::TextWrapped("Every file matched the known-good disc. The game is in %s.", HomeRelative(st.destination).c_str());
-            ImGui::TextWrapped("You can delete the disc image now if you like; the game doesn't need it any more.");
+            if (st.InPlace())
+            {
+                ImGui::TextWrapped("Every file matched the known-good disc. The game is played from %s.",
+                    HomeRelative(st.destination).c_str());
+                ImGui::TextWrapped("Keep the disc image there: the game reads its files from it.");
+            }
+            else
+            {
+                ImGui::TextWrapped("Every file matched the known-good disc. The game is in %s.", HomeRelative(st.destination).c_str());
+                ImGui::TextWrapped("You can delete the disc image now if you like; the game doesn't need it any more.");
+            }
             ImGui::Spacing();
 #if defined(__APPLE__) && TARGET_OS_IOS
             ImGui::TextDisabled("In game, press View + Menu on a controller, or tap with three fingers, to open the settings.");

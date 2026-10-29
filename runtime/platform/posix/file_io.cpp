@@ -97,10 +97,20 @@ namespace platform
 
     std::optional<uint64_t> FreeSpace(const std::filesystem::path& folder)
     {
+#ifdef __PROSPERO__
+        // The pinned ps5_statvfs is synthetic: always 16 GiB available on
+        // a 64 GiB volume. It is not a storage measurement, including for
+        // USB paths. Unknown keeps the installer from displaying 17.18 GB
+        // or making a preflight decision based on that fabricated value.
+        // Actual ENOSPC/EDQUOT writes are still handled by the installer.
+        (void)folder;
+        return std::nullopt;
+#else
         struct statvfs vfs;
         if (statvfs(folder.c_str(), &vfs) != 0)
             return std::nullopt;
         return uint64_t(vfs.f_bavail) * vfs.f_frsize;
+#endif
     }
 
     int CheckWritableFolder(const std::filesystem::path& folder, NewEntry)

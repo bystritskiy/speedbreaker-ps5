@@ -10,6 +10,7 @@
 #include <text_overrides.h>
 #endif
 #include <cerrno>
+#include <install/game_image.h>
 #include <kernel/write_watch.h>
 #include <report/report.h>
 #include "dispatcher.h"
@@ -66,7 +67,16 @@ namespace
     std::optional<HostAttributes> Stat(const std::filesystem::path& path, bool readOnly)
     {
         platform::FileInfo st;
-        if (platform::InfoOf(path, st) != 0)
+        if (install::image::Contains(path))
+        {
+            std::optional<install::image::Entry> e = install::image::Find(path);
+            if (!e)
+                return std::nullopt;
+            st.directory = e->directory;
+            st.size = e->size;
+            install::image::ModifiedTime(st.modifiedSeconds, st.modifiedNanoseconds);
+        }
+        else if (platform::InfoOf(path, st) != 0)
             return std::nullopt;
         HostAttributes a;
         bool dir = st.directory;
@@ -119,6 +129,10 @@ static_assert(offsetof(X_FILE_DIRECTORY_INFORMATION, fileName) == 0x40);
 struct FileObject final : Waitable
 {
     int fd = -1;
+    // A file in the disc image the game is read from (install/game_image.h):
+    // `fd` is the image's, and the file is this run of it.
+    bool inImage = false;
+    uint64_t imageOffset = 0, imageSize = 0;
     std::filesystem::path path;
     std::string guestPath;
     bool readOnly = false;
@@ -191,6 +205,17 @@ namespace
         }
     }
 
+    // pread of the file, or of its run of the disc image.
+    int64_t ReadFileAt(const FileObject* file, void* buffer, size_t size, uint64_t offset)
+    {
+        if (!file->inImage)
+            return platform::ReadAt(file->fd, buffer, size, offset);
+        if (offset >= file->imageSize)
+            return 0;
+        size = size_t(std::min<uint64_t>(size, file->imageSize - offset));
+        return platform::ReadAt(file->fd, buffer, size, file->imageOffset + offset);
+    }
+
     void SignalEvent(uint32_t eventHandle)
     {
         if (eventHandle == 0 || !IsKernelObject(eventHandle))
@@ -235,8 +260,19 @@ uint32_t NtCreateFile(be<uint32_t>* handleOut, uint32_t desiredAccess, XOBJECT_A
     }
 
     std::error_code ec;
-    bool exists = std::filesystem::exists(resolved->host, ec);
-    bool isDir = exists && std::filesystem::is_directory(resolved->host, ec);
+    std::optional<install::image::Entry> inImage;
+    bool exists, isDir;
+    if (install::image::Contains(resolved->host))
+    {
+        inImage = install::image::Find(resolved->host);
+        exists = inImage.has_value();
+        isDir = exists && inImage->directory;
+    }
+    else
+    {
+        exists = std::filesystem::exists(resolved->host, ec);
+        isDir = exists && std::filesystem::is_directory(resolved->host, ec);
+    }
     bool wantDir = (createOptions & FILE_DIRECTORY_FILE) != 0;
 
     auto fail = [&](uint32_t status, uint32_t info) {
@@ -285,7 +321,15 @@ uint32_t NtCreateFile(be<uint32_t>* handleOut, uint32_t desiredAccess, XOBJECT_A
             flags |= O_TRUNC | O_RDWR;
             action = disposition == FILE_SUPERSEDE ? FILE_SUPERSEDED : FILE_OVERWRITTEN;
         }
-        file->fd = platform::OpenFile(resolved->host, flags, 0644);
+        if (inImage)
+        {
+            file->fd = install::image::OpenImage();
+            file->inImage = true;
+            file->imageOffset = inImage->offset;
+            file->imageSize = inImage->size;
+        }
+        else
+            file->fd = platform::OpenFile(resolved->host, flags, 0644);
         if (file->fd < 0)
         {
             DestroyKernelObject(file);
@@ -333,13 +377,13 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t eventHandle, uint32_t apcRouti
     ssize_t n = 0;
     while (uint32_t(n) < length)
     {
-        int64_t got = platform::ReadAt(file->fd, dst + n, length - uint32_t(n), pos + uint64_t(n));
+        int64_t got = ReadFileAt(file, dst + n, length - uint32_t(n), pos + uint64_t(n));
         if (got < 0 && errno == EFAULT)
         {
             static thread_local std::vector<uint8_t> bounce;
             bounce.resize(length - uint32_t(n));
             do
-                got = platform::ReadAt(file->fd, bounce.data(), bounce.size(), pos + uint64_t(n));
+                got = ReadFileAt(file, bounce.data(), bounce.size(), pos + uint64_t(n));
             while (got < 0 && errno == EINTR);
             if (got > 0)
                 memcpy(dst + n, bounce.data(), size_t(got));
@@ -364,7 +408,7 @@ uint32_t NtReadFile(uint32_t fileHandle, uint32_t eventHandle, uint32_t apcRouti
         auto readSlot = [file](uint64_t offset, uint8_t* slot, size_t size) {
             for (size_t done = 0; done < size;)
             {
-                int64_t got = platform::ReadAt(file->fd, slot + done, size - done, offset + done);
+                int64_t got = ReadFileAt(file, slot + done, size - done, offset + done);
                 if (got < 0 && errno == EINTR)
                     continue;
                 if (got <= 0)
@@ -597,9 +641,16 @@ uint32_t NtQueryDirectoryFile(uint32_t fileHandle, uint32_t eventHandle, uint32_
             dir->pattern = "*";
         dir->entries.clear();
         std::error_code ec;
-        for (auto& e : std::filesystem::directory_iterator(dir->path, ec))
-            if (vfs::WildcardMatch(dir->pattern, e.path().filename().string()))
-                dir->entries.push_back(e.path());
+        if (install::image::Contains(dir->path))
+        {
+            for (const std::filesystem::path& e : install::image::List(dir->path))
+                if (vfs::WildcardMatch(dir->pattern, e.filename().string()))
+                    dir->entries.push_back(e);
+        }
+        else
+            for (auto& e : std::filesystem::directory_iterator(dir->path, ec))
+                if (vfs::WildcardMatch(dir->pattern, e.path().filename().string()))
+                    dir->entries.push_back(e.path());
         std::sort(dir->entries.begin(), dir->entries.end());
         dir->nextEntry = 0;
     }

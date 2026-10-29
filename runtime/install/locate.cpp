@@ -88,6 +88,54 @@ namespace install
             return xex;
         }
 
+        fs::path ImageRecordFile()
+        {
+            return GetUserPath() / "game-image";
+        }
+
+        // The image RecordImage recorded, if it is there with the size it had
+        // when its files were checked, against a manifest still compiled in.
+        std::optional<GameInstall> UsableImage(const Manifest& requested)
+        {
+            FILE* f = platform::OpenStdioFile(ImageRecordFile(), "rb");
+            if (!f)
+                return std::nullopt;
+            char buffer[4096];
+            size_t n = fread(buffer, 1, sizeof(buffer) - 1, f);
+            fclose(f);
+            std::string_view text(buffer, n), lines[3];
+            for (std::string_view& line : lines)
+            {
+                size_t end = text.find('\n');
+                line = text.substr(0, end);
+                text.remove_prefix(end == std::string_view::npos ? text.size() : end + 1);
+            }
+            const fs::path image(std::string{ lines[0] });
+            const Manifest* manifest = nullptr;
+            for (const Manifest* m : IsGameManifest(requested) ? GameManifests() : std::span<const Manifest* const>())
+                if (m->version == lines[1])
+                    manifest = m;
+            if (!IsGameManifest(requested) && requested.version == lines[1])
+                manifest = &requested;
+            std::error_code ec;
+            uint64_t size = fs::file_size(image, ec);
+            if (image.empty() || !manifest || ec || std::to_string(size) != lines[2])
+            {
+                fprintf(stderr, "[install] the game was read from the disc image %s, which %s\n", image.string().c_str(),
+                    !manifest ? "was checked against another version of the files: check it again"
+                    : ec ? "isn't there now" : "has changed since it was checked");
+                return std::nullopt;
+            }
+            GameInstall install;
+            install.path = image;
+            install.xex = image / "default.xex";
+            install.origin = InstallOrigin::User;
+            install.marker = true;
+            install.image = true;
+            install.manifest = manifest;
+            return install;
+        }
+
         GameInstall Found(const fs::path& dir, const fs::path& xex, InstallOrigin origin, const Manifest& manifest)
         {
             std::error_code ec;
@@ -169,6 +217,8 @@ namespace install
         }
         if (std::optional<fs::path> xex = UsableXex("game/files", false, requested, &manifest))
             return Found("game/files", *xex, InstallOrigin::Development, *manifest);
+        if (std::optional<GameInstall> image = UsableImage(requested))
+            return image;
 
         // An install the player put on another drive.
         if (std::optional<fs::path> recorded = RecordedInstallPath())
@@ -261,9 +311,20 @@ namespace install
         return ReadInstallRecord(LocationFile(), portable::Current());
     }
 
+    bool RecordImage(const std::filesystem::path& image, const Manifest& manifest)
+    {
+        std::error_code ec;
+        fs::path absolute = fs::absolute(image, ec).lexically_normal();
+        uint64_t size = fs::file_size(absolute, ec);
+        if (ec)
+            return false;
+        return WriteInstallRecord(ImageRecordFile(), std::format("{}\n{}\n{}", absolute.string(), manifest.version, size));
+    }
+
     bool RecordInstallPath(const std::filesystem::path& dir)
     {
         std::error_code ec;
+        fs::remove(ImageRecordFile(), ec);
         fs::path file = LocationFile();
         // As the installer compares folders: absolute, links resolved, no
         // trailing separator (`--dest dir/` and `dir` are one record).

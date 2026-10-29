@@ -7,7 +7,9 @@
 //   <root>:\...                               a root registered through XAM
 //                                             (XamContentCreateEx: saves, ...)
 // Lookups are case-insensitive, component by component, because the disc's
-// names are upper case and Linux file systems are case-sensitive.
+// names are upper case and Linux file systems are case-sensitive. The game
+// folder can be a disc image read in place (install/game_image.h): its host
+// paths then name files in the image.
 #pragma once
 #include <filesystem>
 #include <optional>

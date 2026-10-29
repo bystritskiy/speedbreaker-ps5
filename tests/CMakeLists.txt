@@ -234,6 +234,10 @@ if(WIN32)
 endif()
 # Where the per-user folders go, and the platform layer's file calls.
 sb_test(paths_test)
+if(NOT WIN32)
+    sb_test(ps5_filesystem_test SOURCES ${ROOT}/port/ps5/src/filesystem_ps5.cpp)
+    target_include_directories(ps5_filesystem_test PRIVATE ${ROOT}/port/ps5/src)
+endif()
 if(WIN32)
     sb_test(file_io_test SOURCES ${RT}/platform/win32/file_io.cpp ARGS ${CMAKE_CURRENT_BINARY_DIR}/file_io_out)
     target_sources(paths_test PRIVATE ${RT}/platform/win32/folders.cpp)
@@ -284,10 +288,18 @@ if(NOT WIN32)
         ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
         ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp
         ARGS ${CMAKE_BINARY_DIR}/region_manifest_scratch)
+    # The game read from a disc image in place (install/game_image.h,
+    # install::UseImage), against the image NFSMW_TEST_IMAGE names; without
+    # it, skipped.
+    sb_test(game_image_test SOURCES ${RT}/install/game_image.cpp ${RT}/install/placement.cpp ${RT}/install/installer.cpp
+        ${RT}/install/locate.cpp ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp
+        ${RT}/install/sha256.cpp ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp
+        ARGS ${CMAKE_BINARY_DIR}/game_image_scratch)
     if(APPLE AND NOT IOS)
         target_link_libraries(install_folder_test PRIVATE "-framework CoreFoundation")  # placement.cpp's iCloud check
         target_link_libraries(portable_test PRIVATE "-framework CoreFoundation")
         target_link_libraries(region_manifest_test PRIVATE "-framework CoreFoundation")
+        target_link_libraries(game_image_test PRIVATE "-framework CoreFoundation")
     endif()
 endif()
 # The PAL (Spanish) release's hook addresses (runtime/region/region.h):

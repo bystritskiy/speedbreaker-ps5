@@ -24,7 +24,8 @@ supported executable of the other platforms). Either
   7.1 GB) to `/data/speedbreaker/game/`, for example with
   `port/ps5/tools/upload-game.py --addr <console> game/files`; or
 - put the disc image (`.iso`) in `/data/speedbreaker/`, `/data/` or the top
-  of a USB drive, and let the first-run installer install it.
+  of a USB drive, and let the first-run installer check it: the game is then
+  played from the image, which stays there.
 
 The FTP uploader verifies the source against the USA manifest, reads back and
 hashes every remote file, and writes `.nfsmw-install` last: the game counts the
@@ -33,6 +34,24 @@ network even when no file needs uploading.
 
 Saves, settings, logs (`logs/`) and the shader cache (`cache/`) are in
 `/data/speedbreaker/`.
+
+For an extracted folder the installer shows how much space the game needs. It
+does not report free space on PS5: the pinned SDK's `statvfs` always returns a
+synthetic 16 GiB available, irrespective of the actual disk. If storage fills
+during the copy, the installer reports the write failure and removes its
+partial copy.
+
+The installer doesn't copy a disc image: it checks every file in it and
+records it (`/data/speedbreaker/game-image`), and the game reads its files
+from the image where it is (`runtime/install/game_image.h`). Keep the image
+there. The kernel meters what an application writes to disk: a budget of
+about 2.5 GB per launch, refilling at about 2 MB/s, with writes held back in
+steps as it drains (~100, 25, 11, then 2 MB/s), so a copy of the disc fell to
+a crawl after its first gigabytes. It meters the disk writes, not the call
+(writing through a shared mapping only moved the wait into `fsync()`), and
+libkernel's `{CTL_KERN, 63}` write-throttling setting doesn't lift it. The
+status is `sysctl({CTL_KERN, 61})`: 24 bytes, the budget left in 64 KiB units
+and the mode, 4 down to 1. An extracted folder is still copied.
 
 ## Building (macOS host)
 
