@@ -107,8 +107,8 @@ even its PlayStation button text is made at run time from your disc's own text.
 - A **PS5 that runs homebrew**, with **ShadowMountPlus** (it puts folder apps on the home screen)
   and an **FTP server** (ftpsrv, port 2121) for copying files. This is homebrew, not a
   PlayStation Store app.
-- Your own **USA (NTSC-U) Xbox 360 disc** of *Need for Speed: Most Wanted* (2005), as a disc image
-  (`.iso`) or extracted: its `default.xex` has SHA-256
+- Your own **USA (NTSC-U) Xbox 360 disc** of *Need for Speed: Most Wanted* (2005), backed up by
+  you as a disc image (`.iso`) or extracted files: its `default.xex` has SHA-256
   `aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c`. Other regions aren't
   supported on the PS5 yet.
 - About 8 GB free on the console for the disc image (7.5 GB for extracted files).
@@ -119,10 +119,11 @@ even its PlayStation button text is made at run time from your disc's own text.
    unpack it, and copy the `PPSA90505` folder to `/data/homebrew/` on the console. The
    **SpeedBreaker** tile appears on the home screen. Or install it from
    [RecompStore](https://recompstore.com/game/PPSA90505).
-2. **Your disc.** Copy the disc image (`.iso`) to `/data/speedbreaker/` over FTP (or to `/data/`
-   or the top of a USB drive). Start the tile, choose the image and press **Install**: every file
-   is checked against the USA disc, which takes under a minute, and nothing is copied. The game
-   is played from the image, so keep it where it is.
+2. **Your disc.** Copy the disc image (`.iso`) you made from your own disc to
+   `/data/speedbreaker/` over FTP (or to `/data/` or the top of a USB drive). Start the tile,
+   choose the image and press **Install**: every file is checked against the USA disc, which
+   takes under a minute, and nothing is copied. The game is played from the image, so keep it
+   where it is.
 
    Or extract the image (for example with extract-xiso) and copy `default.xex`, `NFS/` and
    `Movies/` (49 files, 7.1 GB) to `/data/speedbreaker/game/`. The uploader checks every file
