@@ -33,12 +33,15 @@ namespace install
         std::filesystem::path xex;
         InstallOrigin origin = InstallOrigin::User;
         bool marker = false;            // holds Install's marker for the current manifest
+        bool image = false;             // `path` is a disc image the game is read from (UseImage, install/game_image.h)
         const Manifest* manifest = nullptr;  // the region it is (for a compiled-in manifest, the one whose default.xex size it has)
     };
 
     // The first usable game directory of:
     //   1. NFSMW_GAME_DIR, if set (skipped with a log line if it isn't usable)
     //   2. ./game/files (a development checkout)
+    //   then the disc image UseImage recorded (RecordImage), if it is still
+    //   there as it was checked, and the folder RecordInstallPath recorded
     //   3. GetUserPath()/game (DefaultInstallPath(), where Install puts it)
     // Each needs default.xex with the manifest's size. The third also needs
     // Install's marker for the current manifest version: it is the one the
@@ -72,6 +75,12 @@ namespace install
     // it (user/portable.h), so the record moves with the folder.
     std::optional<std::filesystem::path> RecordedInstallPath();
     bool RecordInstallPath(const std::filesystem::path& dir);
+
+    // The disc image the game is read from in place (UseImage): recorded in
+    // GetUserPath()/game-image with the manifest version its files were
+    // checked against and its size then. RecordInstallPath removes it (an
+    // install in a folder takes over).
+    bool RecordImage(const std::filesystem::path& image, const Manifest& manifest);
 
     // The same for any record file, read as `layout` says (a relative record
     // only in portable mode), and a record's text written to one, atomically

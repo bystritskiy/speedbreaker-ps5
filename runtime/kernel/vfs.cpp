@@ -3,6 +3,7 @@
 #include "vfs.h"
 #include "xam.h"
 
+#include <install/game_image.h>
 #include <user/paths.h>
 
 namespace vfs
@@ -27,6 +28,8 @@ namespace vfs
         // Finds `name` in `dir`, exact match first, then case-insensitively.
         std::optional<std::filesystem::path> FindChild(const std::filesystem::path& dir, std::string_view name)
         {
+            if (install::image::Contains(dir))
+                return install::image::Child(dir, name);
             std::error_code ec;
             std::filesystem::path exact = dir / std::string(name);
             if (std::filesystem::exists(exact, ec))

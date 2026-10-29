@@ -9,6 +9,9 @@
 //   SpeedBreaker --install <image>     and the other commands in install/install_cli.h
 
 #include "stdafx.h"
+#ifdef __PROSPERO__
+#include "startup_args.h"
+#endif
 #include "kernel/arena.h"
 #include "kernel/memory_status.h"
 #include "kernel/module.h"
@@ -21,6 +24,7 @@
 #include <hid/input.h>
 #include <cpu/guest_thread.h>
 #include <cpu/host_cpu.h>
+#include <install/game_image.h>
 #include <install/install_cli.h>
 #include <install/locate.h>
 #include <install/placement.h>
@@ -202,6 +206,16 @@ namespace
         return nullptr;
     }
 
+    // A disc image the game is read from in place (install::UseImage): its
+    // files' index, before anything opens them. False if it can't be read.
+    bool MountImage(const std::filesystem::path& image)
+    {
+        install::Result r = install::image::Mount(image);
+        if (!r.Ok())
+            fprintf(stderr, "[runtime] can't read the disc image %s: %s\n", image.string().c_str(), r.message.c_str());
+        return r.Ok();
+    }
+
     // default.xex in a game folder, whatever its case (a tool may have
     // written DEFAULT.XEX; Linux file systems are case-sensitive).
     std::filesystem::path FindXex(const std::filesystem::path& dir)
@@ -328,6 +342,9 @@ int main(int argc, char** argv)
     // the installer never puts the game inside it (install/placement.h), and
     // a portable.txt there keeps all of SpeedBreaker's data in it
     // (user/portable.h).
+#ifdef __PROSPERO__
+    ps5::startup::RemoveTitleArgument(argc, argv);
+#endif
     install::SetProgramPath(argc > 0 ? argv[0] : nullptr);
     // Before anything uses the per-user folders: portable mode or not, and
     // then (not in portable mode) nfsmw-recomp's folders become
@@ -541,12 +558,13 @@ int main(int argc, char** argv)
             SetGamePath(std::filesystem::absolute(xexPath).parent_path());
         gameOrigin = "the XEX on the command line";
     }
-    else if (std::optional<install::GameInstall> game = install::FindGameInstall())
+    else if (std::optional<install::GameInstall> game = install::FindGameInstall(); game && (!game->image || MountImage(game->path)))
     {
         SetGamePath(game->path);
         xexPath = game->xex;  // as spelled on disk
         gameOrigin = game->origin == install::InstallOrigin::Environment ? "NFSMW_GAME_DIR"
             : game->origin == install::InstallOrigin::Development ? "./game/files"
+            : game->image ? "read from the disc image in place"
             : game->marker ? "installed by the game's installer" : "installed";
 #if defined(__APPLE__) && TARGET_OS_IOS
         // The installer keeps its install out of iCloud and computer backups,
@@ -575,7 +593,15 @@ int main(int argc, char** argv)
             return 0;
         }
         SetGamePath(*installed);
-        xexPath = FindXex(*installed);
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(*installed, ec))
+        {
+            if (!MountImage(*installed))
+                return 1;
+            xexPath = *installed / "default.xex";
+        }
+        else
+            xexPath = FindXex(*installed);
         gameOrigin = "installed by the game's installer just now";
     }
     else
@@ -586,7 +612,11 @@ int main(int argc, char** argv)
     }
     fprintf(stderr, "[runtime] game files: %s\n", GetGamePath().string().c_str());
 
-    std::vector<uint8_t> file = LoadFile(xexPath);
+    std::vector<uint8_t> file;
+    if (install::image::Contains(xexPath))
+        install::image::ReadAll(xexPath, file);
+    else
+        file = LoadFile(xexPath);
     if (file.empty())
     {
         fprintf(stderr, "[runtime] cannot read %s\n", xexPath.string().c_str());

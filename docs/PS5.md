@@ -18,6 +18,9 @@ disc's files in `/data/speedbreaker/game/`, started from its home-screen tile:
   of a race runs at 60 fps; busy moments were measured between 51 and 60.
 - **Presentation:** DualSense prompts in the menus and races, the DualSense diagram on the
   Controls and loading screens, and the PlayStation names in the English text.
+- **Installing from a disc image:** the USA `.iso` in `/data/speedbreaker/`, chosen in the
+  first-run installer: every file checked in under 40 seconds, nothing copied, and the game
+  then played from the image to the menu and a race.
 - **Bug reports:** Save Bug Report writes its zip to `/data/speedbreaker/`, and
   `port/ps5/tools/fetch-report.py` fetches it; no crash reports in the tested sessions.
 
@@ -25,8 +28,7 @@ disc's files in `/data/speedbreaker/game/`, started from its home-screen tile:
 
 - Discs other than the USA one (the PAL Spanish disc is left out of the PS5 build).
 - The nine other languages on a console; their text was checked against the disc offline.
-- Installing from a disc image on the console; the tested way is copying the extracted files
-  over FTP (`port/ps5/tools/upload-game.py`).
+- A disc image on a USB drive, and a whole Career played from an image.
 - Two-player split screen, steering wheels, and long sessions of several hours.
 - Every event, car and part of the city: the game is long, and not all of it has been played.
 

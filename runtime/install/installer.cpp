@@ -1,5 +1,6 @@
 // SpeedBreaker runtime. GPL-3.0-or-later (see COPYING). See installer.h.
 #include "installer.h"
+#include "locate.h"
 #include <user/platform_labels.h>
 
 #include <user/paths.h>
@@ -226,6 +227,16 @@ namespace install
                     "the drive it points to, or choose another folder.", dest.string(), target.string()), dest.string());
             }
             fs::path resolved = fs::weakly_canonical(dest, ec);
+#ifdef __PROSPERO__
+            fprintf(stderr, "[installer] destination %s -> %s (error %d: %s)\n", dest.string().c_str(),
+                resolved.string().c_str(), ec.value(), ec.message().c_str());
+#endif
+            // libc++ 18 can clear canonical's error and return just the
+            // missing suffix. Never turn an absolute install into a relative
+            // one ("game" has no parent for the installer's staging folder).
+            if (!ec && !resolved.is_absolute())
+                return Fail(Error::DestinationNotWritable,
+                    std::format("Cannot resolve the installation folder {}. See the session log.", dest.string()), dest.string());
             dest = ec ? dest.lexically_normal() : resolved;
             if (dest.filename().empty())
                 dest = dest.parent_path();
@@ -900,6 +911,23 @@ namespace install
         p.phase = Progress::Phase::Finalizing;
         p.currentFile = {};
         Report(progress, p);
+        return {};
+    }
+
+    Result UseImage(const DiscSource& source, const ProgressCallback& progress, const std::atomic<bool>* cancel,
+        const Manifest& requested)
+    {
+        if (source.Kind() != SourceKind::Image)
+            return Fail(Error::NotADiscImage, std::format("{} is a folder: only a disc image is read in place.",
+                source.Path().string()), source.Path().string());
+        const Manifest& manifest = SourceManifest(source, requested);
+        Result r = Verify(source, progress, cancel, manifest);
+        if (!r.Ok())
+            return r;
+        if (!RecordImage(source.Path(), manifest))
+            return Fail(Error::DestinationNotWritable, std::format("Cannot record the disc image in {}.",
+                GetUserPath().string()), GetUserPath().string());
+        fprintf(stderr, "[install] every file of %s matched: the game is read from it in place\n", source.Path().string().c_str());
         return {};
     }
 

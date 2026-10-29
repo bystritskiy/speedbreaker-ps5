@@ -113,6 +113,14 @@ namespace install
     Result Verify(const DiscSource& source, const ProgressCallback& progress = {},
         const std::atomic<bool>* cancel = nullptr, const Manifest& manifest = GameManifest());
 
+    // The game read from `source`, a disc image, where it is
+    // (install/game_image.h) rather than copied out of it: what the PS5's
+    // installer does, as the console meters what an app writes. Hashes every
+    // file as Verify does, then records the image for FindGameInstall
+    // (RecordImage). Nothing is written but the record.
+    Result UseImage(const DiscSource& source, const ProgressCallback& progress = {},
+        const std::atomic<bool>* cancel = nullptr, const Manifest& manifest = GameManifest());
+
     // Where Install puts the game by default: GetUserPath()/game.
     std::filesystem::path DefaultInstallPath();
 

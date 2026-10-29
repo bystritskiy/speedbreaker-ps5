@@ -45,6 +45,7 @@
 #include <region/region.h>
 #include "language.h"
 
+#include <install/game_image.h>
 #include <kernel/function.h>
 #include <user/paths.h>
 #include <user/settings.h>
@@ -77,6 +78,8 @@ namespace
     // "NFS"; an install on a case-sensitive file system keeps the disc's).
     std::filesystem::path Child(const std::filesystem::path& dir, std::string_view name)
     {
+        if (install::image::Contains(dir))
+            return install::image::Child(dir, name).value_or(std::filesystem::path());
         std::error_code ec;
         for (const auto& e : std::filesystem::directory_iterator(dir, ec))
         {
@@ -102,14 +105,25 @@ namespace
             std::vector<std::string> movies;
             std::error_code ec;
             if (std::filesystem::path dir = Child(game, "movies"); !dir.empty())
-                for (const auto& e : std::filesystem::directory_iterator(dir, ec))
-                    movies.push_back(e.path().filename().string());
+            {
+                if (install::image::Contains(dir))
+                    for (const std::filesystem::path& e : install::image::List(dir))
+                        movies.push_back(e.filename().string());
+                else
+                    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+                        movies.push_back(e.path().filename().string());
+            }
             std::vector<uint8_t> zdir;
             if (std::filesystem::path nfs = Child(game, "nfs"); !nfs.empty())
                 if (std::filesystem::path index = Child(nfs, "zdir.bin"); !index.empty())
                 {
-                    std::ifstream f(index, std::ios::binary);
-                    zdir.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+                    if (install::image::Contains(index))
+                        install::image::ReadAll(index, zdir);
+                    else
+                    {
+                        std::ifstream f(index, std::ios::binary);
+                        zdir.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+                    }
                 }
             for (size_t i = 0; i < std::size(kLanguages); i++)
                 out.files[i] = Scan(kLanguages[i], movies, zdir, region::IsPalEs());

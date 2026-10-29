@@ -80,7 +80,7 @@ done
 
 # The runtime whole: its SB_HOOK definitions replace the recompiled
 # functions' weak ones, and its static registrations must all run.
-"$SDK/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" --wrap=mprotect --wrap=mmap \
+"$SDK/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" --wrap=mprotect --wrap=mmap --wrap=realpath --wrap=pathconf --wrap=lstat \
     --version-script "$PS5_VULKAN/tooling/native/app-symbols.map" --exclude-libs=ALL --no-dynamic-linker -z nodynamic-undefined-weak --gc-sections \
     -e _start -o "$WORK/llvm-pie.elf" \
     "$WORK/obj/app_crt.o" "$WORK/obj/emutls.o" "$WORK/stubs/libSceAgc.so" "$WORK/stubs/libSceAgcDriver.so" \
