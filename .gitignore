@@ -57,3 +57,9 @@ speedbreaker-bug-report-*.zip
 # Python
 __pycache__/
 *.pyc
+
+# Local inputs, reference checkouts and working files beside the repository.
+/source/
+/refs/
+/work/
+/screenshots/
