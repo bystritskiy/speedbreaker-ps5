@@ -1,9 +1,7 @@
 # SpeedBreaker for PS5: changelog
 
-The PS5 build's own notes, by the app's own version (`contentVersion` in `sce_sys/param.json`),
-which each PS5 release raises. Each entry is the "What's new" note the PS5 app shows once, on the
-first start after an update to it (runtime/CMakeLists.txt compiles it in). The other platforms'
-notes are SpeedBreaker's `CHANGELOG.md`.
+What changed in each release of SpeedBreaker for PS5, newest first. The app shows the newest
+entry once, the first time you start it after an update.
 
 ## 01.000.002
 
