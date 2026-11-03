@@ -72,6 +72,7 @@ even its PlayStation button text is made at run time from your disc's own text.
 - **DualSense throughout.** Cross, Circle, Square, Triangle, L1/R1, L2/R2, Options and Touchpad
   prompts in the menus and races, and a DualSense diagram on the controls and loading screens,
   all drawn for this port. Rumble works.
+- **Two players.** Split screen on one console with two DualSense controllers.
 - **PlayStation wording.** The menus say PS Button, Options and the PS5's names instead of the
   Xbox ones, in all ten languages.
 - **The original look:** sunlit roads and shadows as on the console, the game's own display tone,
