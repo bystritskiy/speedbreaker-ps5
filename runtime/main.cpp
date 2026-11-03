@@ -475,18 +475,26 @@ int main(int argc, char** argv)
     // Which version ran last: a line in the log (so a bug report shows when a
     // problem began), the "What's new" note below, and this version recorded
     // as the last (user/version_check.h).
+    // The version is SpeedBreaker's; on PS5 the app's own (sce_sys/param.json's
+    // contentVersion, runtime/CMakeLists.txt), which each PS5 release raises
+    // while SpeedBreaker's stays, and port/ps5/CHANGELOG.md's headings.
+#ifdef SB_PS5_CONTENT_VERSION
+    const std::string appVersion = SB_PS5_CONTENT_VERSION, appLabel = appVersion;
+#else
+    const std::string appVersion = report::Version(), appLabel = "v" + appVersion;
+#endif
     version::Change versionChange = version::Change::Same;
     std::string lastVersion;  // the last session's ("": not known)
     if (settingsLoaded)
     {
         std::string last = lastVersion = settings::LastVersion();
-        versionChange = version::Classify(last, settings::FileFound(), report::Version());
-        fprintf(stderr, "[version] %s\n", version::Describe(versionChange, last, report::Version()).c_str());
+        versionChange = version::Classify(last, settings::FileFound(), appVersion);
+        fprintf(stderr, "[version] %s\n", version::Describe(versionChange, last, appVersion).c_str());
         if (versionChange != version::Change::Same)
-            settings::RecordVersion(report::Version());
+            settings::RecordVersion(appVersion);
     }
     else
-        fprintf(stderr, "[version] v%s (the last version isn't known: settings.toml didn't load)\n", report::Version());
+        fprintf(stderr, "[version] %s (the last version isn't known: settings.toml didn't load)\n", appLabel.c_str());
     // The window must live on the main thread (macOS); the game gets its own.
     bool windowed = video::Initialize();
 #if defined(_WIN32) && defined(SB_WINDOWS_GUI)
@@ -525,7 +533,7 @@ int main(int argc, char** argv)
 #if defined(__APPLE__) && TARGET_OS_IOS
     report::NoticePreviousCrash(false);
 #else
-    report::NoticePreviousCrash(!lastVersion.empty() && version::Compare(lastVersion, report::Version()) >= 0);
+    report::NoticePreviousCrash(!lastVersion.empty() && version::Compare(lastVersion, appVersion) >= 0);
 #endif
 
 #ifndef _WIN32
@@ -716,7 +724,7 @@ int main(int argc, char** argv)
         const char* force = std::getenv("NFSMW_WHATS_NEW");
         bool show = force && *force ? force[0] == '1' : version::ShowWhatsNew(versionChange, ui::WhatsNewEntry());
         if (show)
-            ui::ShowWhatsNew(report::Version());
+            ui::ShowWhatsNew(appLabel);
     }
     // iOS: the "needs a controller" notice, a few seconds into the game
     // (not over the installer).

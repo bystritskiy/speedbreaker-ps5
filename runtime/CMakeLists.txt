@@ -140,18 +140,29 @@ target_include_directories(SpeedBreaker PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gene
 # CHANGELOG.md, from its "## v<version>" heading to the next "## " one,
 # compiled in (generated/whats_new.inc). An edit of CHANGELOG.md reconfigures.
 set(SB_CHANGELOG ${CMAKE_SOURCE_DIR}/CHANGELOG.md)
+set(SB_NOTE_HEADING "v${CMAKE_PROJECT_VERSION}")
 if(SB_PS5)
-    # SpeedBreaker PS5: the PS5 build's own notes, not the other platforms'.
+    # SpeedBreaker PS5: the PS5 build's own notes, not the other platforms',
+    # under the app's own version: sce_sys/param.json's contentVersion
+    # ("## 01.000.002"), which each PS5 release raises while SpeedBreaker's
+    # stays. main.cpp records and compares that one (SB_PS5_CONTENT_VERSION).
     set(SB_CHANGELOG ${CMAKE_SOURCE_DIR}/port/ps5/CHANGELOG.md)
+    set(SB_PS5_PARAM ${CMAKE_SOURCE_DIR}/port/ps5/sce_sys/param.json)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SB_PS5_PARAM})
+    file(READ ${SB_PS5_PARAM} ps5_param)
+    string(JSON SB_PS5_CONTENT_VERSION GET "${ps5_param}" contentVersion)
+    set(SB_NOTE_HEADING "${SB_PS5_CONTENT_VERSION}")
+    set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS "SB_PS5_CONTENT_VERSION=\"${SB_PS5_CONTENT_VERSION}\"")
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SB_CHANGELOG})
 set(SB_WHATS_NEW "")
 if(EXISTS ${SB_CHANGELOG})
     file(READ ${SB_CHANGELOG} changelog)
     string(REPLACE "\r\n" "\n" changelog "\n${changelog}")
-    string(FIND "${changelog}" "\n## v${CMAKE_PROJECT_VERSION}" at)
+    string(FIND "${changelog}" "\n## ${SB_NOTE_HEADING}" at)
     if(at GREATER_EQUAL 0)
-        string(LENGTH "\n## v${CMAKE_PROJECT_VERSION}" heading)
+        string(LENGTH "\n## ${SB_NOTE_HEADING}" heading)
         math(EXPR after "${at} + ${heading}")
         string(SUBSTRING "${changelog}" ${after} -1 entry)
         # The heading's end ("## v0.1.0" or "## v0.1.0 (2026-10-08)", never v0.1.01).
@@ -170,11 +181,11 @@ if(EXISTS ${SB_CHANGELOG})
     endif()
 endif()
 if(SB_WHATS_NEW STREQUAL "")
-    message(WARNING "CHANGELOG.md has no entry for v${CMAKE_PROJECT_VERSION}: this build shows no \"What's new\" note")
+    message(WARNING "${SB_CHANGELOG} has no entry for ${SB_NOTE_HEADING}: this build shows no \"What's new\" note")
 endif()
 string(FIND "${SB_WHATS_NEW}" ")sbnote\"" bad)
 if(bad GREATER_EQUAL 0)
-    message(FATAL_ERROR "CHANGELOG.md's v${CMAKE_PROJECT_VERSION} entry contains )sbnote\"")
+    message(FATAL_ERROR "${SB_CHANGELOG}'s ${SB_NOTE_HEADING} entry contains )sbnote\"")
 endif()
 set(whats_new_inc "// Generated from CHANGELOG.md by runtime/CMakeLists.txt. Do not edit.\nconstexpr const char kWhatsNewEntry[] = R\"sbnote(${SB_WHATS_NEW})sbnote\";\n")
 set(whats_new_file ${CMAKE_CURRENT_BINARY_DIR}/generated/whats_new.inc)

@@ -125,7 +125,7 @@ namespace ui
         return kWhatsNewEntry;
     }
 
-    void ShowWhatsNew(std::string_view version)
+    void ShowWhatsNew(std::string_view label)
     {
         if (!Ready())
         {
@@ -133,11 +133,11 @@ namespace ui
             return;
         }
         auto note = std::make_shared<Note>();
-        note->title = "Updated to v" + std::string(version);
+        note->title = "Updated to " + std::string(label);
         note->lines = version::ParseNote(WhatsNewEntry());
         if (note->lines.empty())
             return;
-        fprintf(stderr, "[ui] What's new: v%.*s (%zu lines)\n", int(version.size()), version.data(), note->lines.size());
+        fprintf(stderr, "[ui] What's new: %.*s (%zu lines)\n", int(label.size()), label.data(), note->lines.size());
         SetModal([note] { Draw(*note); });
     }
 }

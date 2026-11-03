@@ -119,10 +119,11 @@ namespace ui
 
     // This version's CHANGELOG.md entry, compiled in ("" without one).
     std::string_view WhatsNewEntry();
-    // Main thread: the one-time "What's new" note ("Updated to v<version>"
-    // and WhatsNewEntry()) as a modal panel over the game until the player
-    // closes it (A, B, Start, Esc or OK). Nothing without an entry.
-    void ShowWhatsNew(std::string_view version);
+    // Main thread: the one-time "What's new" note ("Updated to <label>":
+    // "v0.2.0", on PS5 "01.000.002"; and WhatsNewEntry()) as a modal panel
+    // over the game until the player closes it (A, B, Start, Esc or OK).
+    // Nothing without an entry.
+    void ShowWhatsNew(std::string_view label);
     // Main thread: a one-time notice (`title`, a paragraph of `text`, OK) as a
     // panel over the game, which pauses under it, until the player closes it
     // (A, B, Start, Esc or OK); then `closed` runs with how. False (nothing

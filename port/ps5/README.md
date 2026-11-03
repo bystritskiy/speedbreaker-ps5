@@ -100,8 +100,10 @@ The tile appears on the home screen. Then copy your game files as above.
 
 ## Releasing
 
-Raise `contentVersion` in `sce_sys/param.json` (`01.000.001`, ...) and commit
-it: consoles and the homebrew stores compare it to find updates. Build and
+Raise `contentVersion` in `sce_sys/param.json` (`01.000.001`, ...), add its
+entry to `CHANGELOG.md` (`## 01.000.001`: the app's "What's new" note, shown
+once after the update; the build warns without one) and commit them: consoles,
+the homebrew stores and the app itself compare it to find updates. Build and
 link that commit, then
 
 ```sh
