@@ -136,7 +136,9 @@ other save data.
 - **Audio:** an SDL audio driver for AudioOut (`sdl/SDL_ps5audio.c`,
   S16 stereo 48 kHz), under SDL's audio streams the runtime already uses.
 - **Input:** the DualSense through libScePad as an SDL virtual gamepad
-  (`src/pad_ps5.cpp`): Options is Start, the touchpad click Back.
+  (`src/pad_ps5.cpp`): Options is Start, the touchpad click Back. Split
+  screen's second player is another signed-in user's pad, a second virtual
+  gamepad attached while it's connected (`tests/ps5_pad_test.cpp`).
 - **Memory:** the guest's 4 GB is a reserved range filled with direct
   memory (`ps5platform/shm.h`): one object below 0xA0000000, and the 512 MB
   of physical memory mapped at 0xA0000000, 0xC0000000 and 0xE0000000

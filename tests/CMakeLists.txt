@@ -345,16 +345,24 @@ sb_test(memory_status_test SOURCES ${RT}/kernel/memory_status.cpp ${RT}/platform
 sb_test(version_check_test)
 # The keys a Controls row can hold and their names in settings.toml
 # (user/key_names.h, header only), each row against SDL's scancode name.
-# The only test that links SDL3, so it keeps the build tree's path to it even
+# It links SDL3 (as ps5_pad_test below does), so it keeps the build tree's path to it even
 # with -DCMAKE_SKIP_BUILD_RPATH=ON: the Steam Frame's cmake line
 # (scripts/steamos/README.md) keeps ~/deps/sdl3/lib out of the game that
 # way, and ctest runs the tests without LD_LIBRARY_PATH, so this one couldn't
-# load libSDL3 there (v0.1.5). Only this test: the game's own rpath is
+# load libSDL3 there (v0.1.5). Only these tests: the game's own rpath is
 # unchanged (none on the Frame).
 find_package(SDL3 REQUIRED CONFIG)
 sb_test(key_names_test)
 target_link_libraries(key_names_test PRIVATE SDL3::SDL3)
 set_target_properties(key_names_test PROPERTIES SKIP_BUILD_RPATH OFF)
+if(NOT WIN32)
+    # The PS5's two DualSense players as SDL virtual gamepads
+    # (port/ps5/src/pad_ps5.cpp), over a stand-in libScePad.
+    sb_test(ps5_pad_test SOURCES ${ROOT}/port/ps5/src/pad_ps5.cpp)
+    target_include_directories(ps5_pad_test PRIVATE ${ROOT}/port/ps5/src)
+    target_link_libraries(ps5_pad_test PRIVATE SDL3::SDL3)
+    set_target_properties(ps5_pad_test PROPERTIES SKIP_BUILD_RPATH OFF)
+endif()
 # The Key options (Settings > Controls): the table, the [keys] names in the
 # file, and what Set accepts (user/settings.cpp and the toml++ XenonRecomp
 # vendors; no SDL).

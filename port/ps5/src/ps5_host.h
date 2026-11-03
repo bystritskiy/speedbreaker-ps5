@@ -6,10 +6,14 @@
 
 namespace ps5::pad
 {
-    // Attaches the DualSense as an SDL virtual gamepad (after SDL's gamepad
-    // subsystem is up: hid::Initialize).
+    // Attaches player 1's DualSense as an SDL virtual gamepad (after SDL's
+    // gamepad subsystem is up: hid::Initialize).
     void Attach();
-    // Stops the motors and closes the pad.
+    // Main thread, once a frame (hid::Update): once a second, which signed-in
+    // users are players 1 and 2; attaches player 2's gamepad while their pad
+    // is connected and detaches it when it goes.
+    void Poll();
+    // Stops the motors and closes the pads.
     void Shutdown();
 }
 

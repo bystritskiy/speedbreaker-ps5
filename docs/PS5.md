@@ -29,7 +29,9 @@ disc's files in `/data/speedbreaker/game/`, started from its home-screen tile:
 - Discs other than the USA one (the PAL Spanish disc is left out of the PS5 build).
 - The nine other languages on a console; their text was checked against the disc offline.
 - A disc image on a USB drive, and a whole Career played from an image.
-- Two-player split screen, steering wheels, and long sessions of several hours.
+- Two-player split screen: the second DualSense (another signed-in user's) is built in and
+  passes its host test, but hasn't been played on a console yet.
+- Steering wheels, and long sessions of several hours.
 - Every event, car and part of the city: the game is long, and not all of it has been played.
 
 ## Not offered on PS5

@@ -157,6 +157,10 @@ A, Circle is B, Square is X and Triangle is Y. The prompts on screen show the Du
 **Touchpad + Options** together open or close the settings. Because of that chord, the game sees
 the touchpad click a moment late: a tap arrives when you let go.
 
+**Two players** (Quick Race > Split Screen): the second DualSense has to be signed in as a second
+PS5 user; a guest will do. It joins at "Player 2 press START" with Options. Assist mode, which
+merges two controllers into one, doesn't add a player.
+
 ## Settings
 
 The game pauses while the settings are open. The D-pad chooses and changes a row, L1 and R1 turn

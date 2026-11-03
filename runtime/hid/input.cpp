@@ -1166,6 +1166,9 @@ namespace hid
 #if defined(__APPLE__) && TARGET_OS_IOS
         NoControllerNotice();
 #endif
+#ifdef __PROSPERO__
+        ps5::pad::Poll();  // player 2's DualSense comes and goes as an SDL gamepad
+#endif
         Pad p;
         float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;
         bool padBack = false;  // the controller's Back, as the device reports it
