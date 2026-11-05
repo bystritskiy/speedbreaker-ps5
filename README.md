@@ -7,18 +7,7 @@
 
 <p align="center">
   <b>SpeedBreaker for PS5: <i>Need for Speed: Most Wanted</i> (2005), the Xbox 360 version<br>
-  statically recompiled into a native app for homebrew-enabled PS5 consoles.<br>
-  Not an emulator, and not the PC version. Bring your own disc.</b>
-</p>
-
-<p align="center">
-  <a href="https://github.com/bystritskiy/speedbreaker-ps5/releases/latest"><b>Download</b></a>
-  &nbsp;·&nbsp;
-  <a href="#install">Install</a>
-  &nbsp;·&nbsp;
-  <a href="#controls">Controls</a>
-  &nbsp;·&nbsp;
-  <a href="#reporting-a-bug">Report a bug</a>
+  statically recompiled into a native app for homebrew-enabled PS5 consoles.</b>
 </p>
 
 <p align="center">
@@ -28,38 +17,31 @@
 </p>
 
 <p align="center">
+  <a href="#install"><b>Install</b></a>
+  &nbsp;·&nbsp;
+  <a href="#controls">Controls</a>
+  &nbsp;·&nbsp;
+  <a href="#settings">Settings</a>
+  &nbsp;·&nbsp;
+  <a href="#reporting-a-bug">Report a bug</a>
+</p>
+
+> [!IMPORTANT]
+> **Bring your own game.**
+> This project does not include or distribute copyrighted game files. Use a dump of your own original disc.
+> Please do not request or share game downloads here.
+
+<p align="center">
   <img src="assets/screenshots/ps5/ps5-01-race-forest-nitrous.jpg" alt="A race through a forest road at night with nitrous flames, the HUD, the rear-view mirror and the race standings" width="100%">
   <br>
   <sub>A race on the PS5, rendered at 3840x2160.</sub>
 </p>
 
-> [!IMPORTANT]
-> **This is SpeedBreaker-ps5, an unofficial fork of
-> [SpeedBreaker](https://github.com/SpeedBreakerProject/speedbreaker) by project(u) that adds a
-> native PlayStation 5 build.** It is not made by project(u), and neither it nor SpeedBreaker is
-> affiliated with, endorsed by or sponsored by Electronic Arts Inc., the Need for Speed brand or
-> Sony Interactive Entertainment. For Steam Deck, Linux, Windows, Mac, iPhone and iPad, get
-> SpeedBreaker itself; report bugs of the PS5 build here, not upstream.
->
-> **No game files are included or distributed.** To play, you need your own legally obtained
-> backup of your own Xbox 360 disc of *Need for Speed: Most Wanted* (2005), USA version. Please
-> don't ask for, or share, game files or disc images. See the full [legal notice](#legal-notice).
-
-**Contents:** [What it is](#what-it-is) · [Highlights](#highlights) ·
-[Requirements](#requirements) · [Install](#install) · [Controls](#controls) ·
-[Settings](#settings) · [Your files](#your-files) · [Reporting a bug](#reporting-a-bug) ·
-[Known issues](#known-issues) · [For developers](#for-developers) · [Credits](#credits) ·
-[License](#license) · [Legal notice](#legal-notice)
-
 ## What it is
 
-SpeedBreaker is a static recompilation of the Xbox 360 version of *Need for Speed: Most Wanted*
-(2005): the Xbox 360 release's own code, translated into native code ahead of time, with a
-runtime that stands in for the console. This fork builds it as a PS5 app: it runs on the PS5's
-own CPU and GPU, without an emulator and without a Windows layer.
-
-It plays the files of your own disc from the console's storage. The app holds no game data:
-even its PlayStation button text is made at run time from your disc's own text.
+This PS5 fork of [SpeedBreaker](https://github.com/SpeedBreakerProject/speedbreaker) by project(u)
+compiles the Xbox 360 game's code ahead of time for the PS5. Its runtime handles graphics, audio,
+input and system services. Builds for other platforms are maintained upstream.
 
 ## Highlights
 
@@ -299,10 +281,6 @@ other trademarks, including Xbox and Xbox 360, belong to their respective owners
 here only to describe what SpeedBreaker works with. The game is named only to say which game
 SpeedBreaker runs; no logos, box art or key art of the game are used. The game content visible
 in screenshots belongs to its owners.
-
-**No game files are included or distributed.** SpeedBreaker contains no game data or assets: no
-textures, models, audio, movies, game text or disc files. To play, you need your own legally
-obtained backup of your own Xbox 360 disc of *Need for Speed: Most Wanted* (2005).
 
 SpeedBreaker is provided "as is", without warranty of any kind, as set out in the GNU General
 Public License.
