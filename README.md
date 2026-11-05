@@ -116,7 +116,7 @@ even its PlayStation button text is made at run time from your disc's own text.
 1. **The app.** Download `PPSA90505.zip` from the [latest release](https://github.com/bystritskiy/speedbreaker-ps5/releases/latest),
    unpack it, and copy the `PPSA90505` folder to `/data/homebrew/` on the console. The
    **SpeedBreaker** tile appears on the home screen. Or install it from
-   [RecompStore](https://recompstore.com/game/PPSA90505).
+   [RecompStore](https://recompstore.com/game/PPSA90505) or [ProsperoStore](https://prosperostore.net/app/PPSA90505/).
 2. **Your disc.** Copy the disc image (`.iso`) you made from your own disc to
    `/data/speedbreaker/` over FTP (or to `/data/` or the top of a USB drive). Start the tile,
    choose the image and press **Install**: every file is checked against the USA disc, which

@@ -89,6 +89,9 @@ DualSense artwork (`dualsense.bgra`, `glyphs.rgba`); `licenses/` and
 
 ## Installing
 
+You can also install the app from [RecompStore](https://recompstore.com/game/PPSA90505) or [ProsperoStore](https://prosperostore.net/app/PPSA90505/).
+You still need to provide your own disc files as described below.
+
 The console needs a homebrew-enabled firmware with ShadowMountPlus and an FTP
 server (ftpsrv, port 2121). Copy the folder to `/data/homebrew/PPSA90505/`:
 
