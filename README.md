@@ -31,6 +31,10 @@
 > This project does not include or distribute copyrighted game files. Use a dump of your own original disc.
 > Please do not request or share game downloads here.
 
+> [!CAUTION]
+> **We do not support piracy.**
+> Please do not use this project with pirated copies of the game.
+
 <p align="center">
   <img src="assets/screenshots/ps5/ps5-01-race-forest-nitrous.jpg" alt="A race through a forest road at night with nitrous flames, the HUD, the rear-view mirror and the race standings" width="100%">
   <br>
