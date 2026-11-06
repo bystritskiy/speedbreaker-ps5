@@ -11,9 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://recompstore.com/game/PPSA90505"><img src="https://img.shields.io/badge/Get_it_on-RecompStore-20d9d2?style=for-the-badge" alt="Get it on RecompStore" height="40"></a>
-  &nbsp;
-  <a href="https://prosperostore.net/app/PPSA90505/"><img src="https://img.shields.io/badge/Get_it_on-ProsperoStore-2563eb?style=for-the-badge" alt="Get it on ProsperoStore" height="40"></a>
+  <a href="https://prosperostore.net/app/PPSA90505/"><img src="https://prosperostore.net/press/badge-dark.png" alt="Get it on ProsperoStore" height="56"></a>
+  <a href="https://recompstore.com/game/PPSA90505"><img src="https://recompstore.com/assets/press/badge-dark.svg" alt="Get it on RecompStore" height="56"></a>
 </p>
 
 <p align="center">
