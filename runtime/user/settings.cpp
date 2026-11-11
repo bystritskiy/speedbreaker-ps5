@@ -133,7 +133,9 @@ namespace settings
         // it only on a surface that has an HDR10 format). Not on iOS (the
         // layer would need poking itself) or Android. HDR Format chooses
         // between EDR and HDR10, so only a Mac shows it.
-#if (defined(__APPLE__) && TARGET_OS_IOS) || defined(__ANDROID__)
+        // Not on PS5 either: its Vulkan surface (RADV over PS5_Vulkan) has
+        // no HDR10 format to offer.
+#if (defined(__APPLE__) && TARGET_OS_IOS) || defined(__ANDROID__) || defined(__PROSPERO__)
         constexpr bool kHdrHidden = true;
 #else
         constexpr bool kHdrHidden = false;
