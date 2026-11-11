@@ -22,12 +22,8 @@
 </p>
 
 <p align="center">
-  <a href="https://recompstore.com/game/PPSA90505">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://recompstore.com/assets/press/badge-light.svg">
-      <img alt="Get it on RecompStore" src="https://recompstore.com/assets/press/badge-dark.svg" height="56">
-    </picture>
-  </a>
+  <a href="https://prosperostore.net/app/PPSA90505/"><img src="https://prosperostore.net/press/badge-dark.png" alt="Get it on ProsperoStore" height="56"></a>
+  <a href="https://recompstore.com/game/PPSA90505"><img src="https://recompstore.com/assets/press/badge-dark.svg" alt="Get it on RecompStore" height="56"></a>
 </p>
 
 <p align="center">
@@ -66,13 +62,17 @@ even its PlayStation button text is made at run time from your disc's own text.
 
 ## Highlights
 
-- **Native 4K.** The 3D scene renders at 3840x2160 (3x the Xbox 360's 720p), with 16x
-  anisotropic filtering.
+- **Native 4K.** The 3D scene renders at 3840x2160 (3x the Xbox 360's 720p), with
+  anisotropic filtering. The menus, the HUD and the movies are enlarged with a sharper filter
+  instead of a blur.
 - **Up to 60 fps,** locked to the TV's 60 Hz; most of a race holds 60.
 - **DualSense throughout.** Cross, Circle, Square, Triangle, L1/R1, L2/R2, Options and Touchpad
   prompts in the menus and races, and a DualSense diagram on the controls and loading screens,
   all drawn for this port. Rumble works.
-- **Two players.** Split screen on one console with two DualSense controllers.
+- **Two players.** Split screen on one console with two DualSense controllers. Outside split
+  screen, the DualSense you last pressed is player 1.
+- **Cops in Quick Race.** A Cops row in Custom Race's race options (Off by default) puts the police
+  in Circuit, Sprint, Lap Knockout and Speedtrap races, in single player.
 - **PlayStation wording.** The menus say PS Button, Options and the PS5's names instead of the
   Xbox ones, in all ten languages.
 - **The original look:** sunlit roads and shadows as on the console, the game's own display tone,
@@ -167,11 +167,12 @@ merges two controllers into one, doesn't add a player.
 The game pauses while the settings are open. The D-pad chooses and changes a row, L1 and R1 turn
 pages, and Circle closes the menu. Every change applies at once and is saved when you close it.
 
-- **Display:** V-Sync, Frame Rate (60 fps / 30 fps / Auto), Aspect Ratio, Brightness and
-  Original Display Tone (the gamma ramp a real Xbox 360 sends to a TV). The PS5 is always full
-  screen.
-- **Graphics:** Anti-Aliasing, Upscaling, Sharpening, Anisotropic Filtering (16x by default) and
-  Internal Resolution (3x, 3840x2160, on the PS5).
+- **Display:** V-Sync, Frame Rate (60 fps / 30 fps / Auto), Aspect Ratio, Brightness, Cooler
+  Colors and Original Display Tone (the gamma ramp a real Xbox 360 sends to a TV). The PS5 is
+  always full screen, in SDR.
+- **Graphics:** Anti-Aliasing, Upscaling, Sharpening, Anisotropic Filtering (Auto: 4x),
+  Internal Resolution (3x, 3840x2160, on the PS5), Shadow Resolution, Sharper UI and Movie
+  Upscaling.
 - **Audio, Input** (deadzones, Vibration), **Game** (Language: one of ten, from the disc's own
   text) and **Advanced** (Asynchronous Shaders, Performance Overlay, **Save Bug Report**).
 
