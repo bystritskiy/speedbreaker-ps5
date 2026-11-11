@@ -3,6 +3,26 @@
 What changed in each release of SpeedBreaker for PS5, newest first. The app shows the newest
 entry once, the first time you start it after an update.
 
+## 01.000.003
+
+### What's new
+
+Now on SpeedBreaker v0.2.4 (was v0.2.0), with what it brings to the PS5:
+
+- **Sharper UI** (Settings > Graphics, on by default): the menus, the HUD and their text are
+  enlarged to 4K with a sharper filter instead of a blur.
+- **Sharper movies:** the intro and the cutscenes are enlarged the same way (Movie Upscaling).
+- **Sharper shadows:** Shadow Resolution's new Auto, the default, draws the sun's shadows at 2x
+  at 4K. A 1x from an earlier version becomes Auto once; choose 1x again to keep it.
+- **Cops in Quick Race:** a Cops row in Custom Race's race options (Off by default) puts the
+  police in Circuit, Sprint, Lap Knockout and Speedtrap races, in single player.
+- **Player 1 follows the DualSense you last pressed,** outside split screen.
+- **Cooler Colors** (Settings > Display, off by default): less of the game's yellow.
+
+### More about it
+
+- HDR Output isn't offered on the PS5: the app's picture is SDR.
+
 ## 01.000.002
 
 ### What's new
