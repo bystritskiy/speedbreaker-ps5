@@ -6,9 +6,12 @@
 // works too (a click selects a row, its arrows change it, the tabs turn
 // pages), and touch as the mouse (on iOS a drag scrolls the rows: ui.cpp).
 // Advanced also has Save Bug Report (report/bug_report.cpp), Check for
-// Updates (update_dialog.cpp), the build's identity (version and commit) and
-// the legal notice. The footer's last button is Quit Game, which asks first
-// (quit_game.h; not on iPhone or iPad).
+// Updates (update_dialog.cpp) with Check for Updates at Startup under it,
+// the build's identity (version and commit) and the legal notice. The
+// footer's last button is Quit Game, which asks first (quit_game.h; not on
+// iPhone or iPad); while a check (at startup or pressed) has found a newer
+// version, its first is "Update to v0.2.5", on every page, which opens the
+// update dialog with it.
 #include <stdafx.h>
 #include "ui.h"
 #include "quit_game.h"
@@ -16,6 +19,7 @@
 #include <game/language.h>  // the Language row's note: what the installed files give
 #include <gpu/renderer.h>    // Internal Resolution's labels: what each entry renders now
 #include <report/report.h>
+#include <update/updater.h>  // the footer's "Update to v0.2.5"
 #include <user/settings.h>
 #include <hid/key_map.h>     // the Controls page: one row per control, two keys each
 #include <hid/wheel.h>       // the Wheel page: the device, its pedals and what they read
@@ -846,6 +850,8 @@ namespace ui
                 ImGui::TextDisabled("Off while the game runs at 30 fps (Frame Rate).");
             else if (o.id == Id::SmoothMotion && settings::GetBool(o.id) && !video::HfrOffered())
                 ImGui::TextDisabled("This screen shows 60 pictures a second: nothing to add here.");
+            else if (o.id == Id::Hdr || o.id == Id::HdrFormat || o.id == Id::HdrStrength || o.id == Id::HdrPaperWhite)
+                ImGui::TextDisabled("In use: %s.", video::HdrStatus());
             else if (o.apply == settings::Apply::Restart)
                 ImGui::TextDisabled("Changes take effect the next time the game starts.");
             else if (std::string note = o.id == Id::FrameRate ? video::AutoFrameRateNote() : std::string(); !note.empty())
@@ -999,7 +1005,7 @@ namespace ui
                             if (o.category == category && Shown(o))
                                 valueWidth = std::max(valueWidth, ValueWidth(o));
                     if (category == Category::Advanced)
-                        for (const char* text : { "Saving...", "Checking...", UpdateRowValue() })
+                        for (const char* text : { "Saving...", "Checking...", "Couldn't check (offline)", UpdateRowValue() })
                             valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
                     if (category == Category::Wheel)
                         for (const char* text : { "Start", "17/17" })
@@ -1019,7 +1025,7 @@ namespace ui
                             }
                         else
                             for (const auto& o : settings::Options())
-                                if (o.category == category && Shown(o))
+                                if (o.category == category && Shown(o) && o.id != Id::UpdateCheck)
                                 {
                                     OptionRow(o, valueWidth, focusFirst);
                                     focusFirst = false;
@@ -1033,6 +1039,8 @@ namespace ui
                             // Not on PS5: no curl to ask GitHub with, and
                             // the project's releases have no PS5 download.
                             UpdateRow(valueWidth);
+                            // The startup check's switch, under the button it adds to.
+                            OptionRow(settings::Info(Id::UpdateCheck), valueWidth, false);
 #endif
                         }
                         ImGui::EndTable();
@@ -1075,6 +1083,17 @@ namespace ui
         for (const auto& o : settings::Options())
             if (o.category == s_category && (Shown(o) || (o.hidden && hiddenCounts)) && !settings::IsDefault(o.id))
                 anyChanged = true;
+        // A newer version (update/updater.h): first, so Down from the rows
+        // lands on it.
+        if (const std::string update = update::FooterLabel(); !update.empty())
+        {
+            PushAccentText();
+            const bool pressed = ImGui::Button(update.c_str());
+            PopAccentText();
+            if (pressed)
+                ShowUpdateDialog();
+            ImGui::SameLine();
+        }
         ImGui::BeginDisabled(!anyChanged);
         if (ImGui::Button("Reset page"))
             ImGui::OpenPopup("reset");
@@ -1096,8 +1115,13 @@ namespace ui
         {
             // (The Controls page leaves out "D-pad: choose": with Quit Game in the
             // footer its legend was wider than the window and lost "B: close".)
+            // Shorter where the footer's buttons leave less room (the update
+            // button), never cut: "B: close" stays.
             const char* legend = s_category == Category::Controls ? PadText("A: set key   Y: clear   X: default   LB RB: page   B: close", "Cross: set   Triangle: clear   Square: default   L1 R1: page   Circle: close")
                                                                  : PadText("D-pad: choose, change   LB RB: page   B: close", "D-pad: choose, change   L1 R1: page   Circle: close");
+            for (const char* shorter : { PadText("LB RB: page   B: close", "L1 R1: page   Circle: close"), PadText("B: close", "Circle: close") })
+                if (ImGui::GetCursorPosX() + ImGui::CalcTextSize(legend).x > ImGui::GetWindowContentRegionMax().x)
+                    legend = shorter;
             float w = ImGui::CalcTextSize(legend).x;
             ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - w));
             ImGui::TextDisabled("%s", legend);

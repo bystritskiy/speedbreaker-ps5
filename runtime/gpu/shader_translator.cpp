@@ -5,9 +5,12 @@
 // (BSD license); comments name the rule where it isn't obvious.
 #include "shader_translator.h"
 #include "shared_memory_glsl.h"
+#include "sharp_ui.h"
 
 #include "xenos/ucode.h"
 
+#include <atomic>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -94,6 +97,7 @@ layout(push_constant) uniform DrawConstants
     uint flags;           // bit 0: apply posScale; bits 1-3: vertex W/XY/Z formats
     vec4 posScale;        // NDC = pos.xy * posScale.xy + posScale.zw * pos.w
     uvec4 vfRedirect[4];  // guest start, size, ring byte offset: vertex data snapshots
+    uint constRing;       // ring byte offset of this draw's XenosConstants, see constRel()
 } pc;
 
 // Textures: set 1, one binding per fetch slot the shader uses (declared after
@@ -169,6 +173,7 @@ float xmul(float a, float b)
             ShaderStage stage;
             const uint32_t* ucode;
             size_t dwords;
+            TranslateOptions options;
             TranslatedShader out;
             std::string body;
             int indent = 1;
@@ -734,7 +739,16 @@ float xmul(float a, float b)
                             : std::format("({}) / vec2(textureSize(t2d_{}, 0))", uv, slot);
                     if (op.offset_x() != 0.0f || op.offset_y() != 0.0f)
                         uv = std::format("({} + vec2({}, {}) / vec2(textureSize(t2d_{}, 0)))", uv, op.offset_x(), op.offset_y(), slot);
-                    value = sample(std::format("t2d_{}", slot), uv);
+                    // Sharper UI's variant (gpu/sharp_ui.h): a pixel
+                    // shader's 2D fetch through sharpTex2D, which keeps
+                    // this very fetch where it doesn't magnify.
+                    if (options.sharpFetch2D && stage == ShaderStage::Pixel && op.dimension() == xenos::FetchOpDimension::k2D)
+                    {
+                        out.sharpFetches++;
+                        value = std::format("sharpTex2D(t2d_{}, {}, {}u, {}, {})", slot, uv, slot, computedLod ? "true" : "false", lod);
+                    }
+                    else
+                        value = sample(std::format("t2d_{}", slot), uv);
                     break;
                 }
                 case xenos::FetchOpDimension::k3DOrStacked:
@@ -1068,10 +1082,78 @@ vec3 cubeDirection(vec3 c)
         return enabled;
     }
 
+    bool RelativeConstantsFromRing()
+    {
+        static const bool enabled = [] { const char* v = std::getenv("NFSMW_CONST_REL_RING"); return !(v && v[0] == '0'); }();
+        return enabled;
+    }
+
+    static std::atomic<uint32_t> s_scalarRegistersDefault{ 0 };
+
+    void SetScalarRegistersDefault(uint32_t stageMask)
+    {
+        s_scalarRegistersDefault.store(stageMask & 3u, std::memory_order_relaxed);
+    }
+
+    uint32_t ScalarRegisters()
+    {
+        static const int forced = [] {
+            const char* v = std::getenv("NFSMW_SCALAR_REGS");
+            return v && *v ? int(strtoul(v, nullptr, 0) & 3u) : -1;
+        }();
+        return forced >= 0 ? uint32_t(forced) : s_scalarRegistersDefault.load(std::memory_order_relaxed);
+    }
+
+    // r[N] -> rN (N constant) through the whole shader, with one variable per
+    // register. Empty if anything still indexes r[] another way.
+    static std::string ScalarizeRegisters(const std::string& g, uint32_t regCount)
+    {
+        std::string decl = "vec4 ", zero;
+        for (uint32_t i = 0; i < regCount; i++)
+        {
+            decl += std::format("{}r{}", i ? ", " : "", i);
+            zero += std::format("r{} = vec4(0.0); ", i);
+        }
+        decl += ";";
+        std::string s = g;
+        auto replaceAll = [&](const std::string& from, const std::string& to) {
+            for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size()))
+                s.replace(at, from.size(), to);
+        };
+        replaceAll("vec4 r[R_COUNT];", decl);
+        replaceAll("for (int i = 0; i < R_COUNT; i++) r[i] = vec4(0.0);", zero);
+        std::string out;
+        out.reserve(s.size());
+        auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        for (size_t i = 0; i < s.size(); i++)
+        {
+            if (s[i] == 'r' && i + 1 < s.size() && s[i + 1] == '[' && (i == 0 || !ident(s[i - 1])))
+            {
+                size_t j = i + 2;
+                while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j])))
+                    j++;
+                if (j == i + 2 || j >= s.size() || s[j] != ']')
+                    return {};  // r[<expression>]: keep the array
+                out += 'r';
+                out.append(s, i + 2, j - i - 2);
+                i = j;
+                continue;
+            }
+            out += s[i];
+        }
+        return out;
+    }
+
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount)
+    {
+        return TranslateShader(stage, ucode, dwordCount, TranslateOptions{});
+    }
+
+    TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount, const TranslateOptions& options)
     {
         Translator t;
         t.stage = stage;
+        t.options = options;
         t.ucode = ucode;
         t.dwords = dwordCount;
         t.Translate();
@@ -1094,6 +1176,10 @@ vec3 cubeDirection(vec3 c)
             if (result.textureCubeMask & (1u << n))
                 g += std::format("layout(set = 1, binding = {}) uniform samplerCube tcube_{};\n", 64 + n, n);
         }
+        if (result.sharpFetches)
+            g += gpu::sharp_ui::kSharpTex2DGlsl;
+        if (options.sharpFetch2D && stage == ShaderStage::Pixel)
+            g += gpu::sharp_ui::kUiMaskDeclGlsl;
         if (stage == ShaderStage::Vertex)
         {
             // Only the interpolators this shader writes are outputs: each
@@ -1124,7 +1210,24 @@ vec3 cubeDirection(vec3 c)
         else
             g += "vec4 o_depth = vec4(0.0);\nbool killed = false;\n";
         g += kStateHelpers;
-        g += std::format(R"(
+        // Relative reads come from the same constants through the ring's
+        // storage buffer: AMD's Windows driver reads a dynamically indexed
+        // u.c[] inside per-pixel predicated blocks as if a0 were 0, which
+        // turned Most Wanted's far verge grass black (issue #67).
+        // NFSMW_CONST_REL_RING=0 reads the uniform buffer as before.
+        if (RelativeConstantsFromRing())
+            g += std::format(R"(
+vec4 constRel(int index, int rel)
+{{
+    int i = index + rel;
+    if (i < 0 || i > 255)
+        return vec4(0.0);
+    uint w = (pc.constRing >> 2) + ({} + uint(i)) * 4u;
+    return uintBitsToFloat(uvec4(g_ring[w], g_ring[w + 1u], g_ring[w + 2u], g_ring[w + 3u]));
+}}
+)", stage == ShaderStage::Vertex ? "pc.vsConstBase" : "pc.psConstBase");
+        else
+            g += std::format(R"(
 vec4 constRel(int index, int rel)
 {{
     int i = index + rel;
@@ -1245,7 +1348,7 @@ void main()
         (af == 6u && a >= pc.alphaRef);
     if (!pass) discard;
 #endif
-#ifdef OUT0
+@@UI_MASK@@#ifdef OUT0
     o_c0 = o_color[0];
 #endif
 #ifdef OUT1
@@ -1260,6 +1363,8 @@ void main()
 }
 )";
         }
+        if (size_t at = g.find("@@UI_MASK@@"); at != std::string::npos)
+            g.replace(at, strlen("@@UI_MASK@@"), options.sharpFetch2D ? gpu::sharp_ui::kUiMaskStoreGlsl : "");
         if (stage == ShaderStage::Vertex)
         {
             std::string outs;
@@ -1269,6 +1374,10 @@ void main()
             size_t at = g.find("@@VS_OUTPUTS@@");
             g.replace(at, strlen("@@VS_OUTPUTS@@"), outs);
         }
+        // Issue #67: one variable per register (see ScalarRegisters()).
+        if (!t.usesRelativeRegisters && (ScalarRegisters() >> uint32_t(stage) & 1u))
+            if (std::string s = ScalarizeRegisters(g, regCount); !s.empty())
+                g = std::move(s);
         // Absolute constant reads: packed slot numbers (the count of used
         // constants below), unless the shader also addresses them relatively.
         result.constPacked = PackedConstantsEnabled() && !result.constRelative;

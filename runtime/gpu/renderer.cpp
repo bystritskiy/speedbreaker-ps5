@@ -20,6 +20,9 @@
 #include "render_scale.h"
 #include "shared_memory_glsl.h"
 #include "shadow_lend.h"
+#include "sharp_ui.h"
+#include "anisotropy_auto.h"
+#include "shadow_auto.h"
 #include "split_views.h"
 #include "xenos/registers.h"
 #ifdef __PROSPERO__
@@ -39,6 +42,7 @@
 #include <game/cover_callers.h>
 #include <game/split_screen.h>
 #include <game/ultrawide.h>
+#include <game/movie_pacing.h>
 
 #include <glslang/Include/glslang_c_interface.h>
 #include <glslang/Public/resource_limits_c.h>
@@ -700,6 +704,23 @@ namespace gpu::renderer
             img = {};
         }
 
+        // Frees the pooled depth images nobody holds (the GPU idle). A change
+        // of the shadow size leaves the old size's behind, never reused.
+        void DrainDepthPool()
+        {
+            auto& pool = DepthPool();
+            for (PooledDepth* d : pool)
+            {
+                for (auto& [swizzle, view] : d->views)
+                    vkDestroyImageView(s_dev, view, nullptr);
+                if (d->sampleView && d->sampleView != d->image.view)
+                    vkDestroyImageView(s_dev, d->sampleView, nullptr);
+                DestroyImage(d->image);
+                delete d;
+            }
+            pool.clear();
+        }
+
         // ---------------------------------------------------------------
         // Command recording
 
@@ -769,6 +790,7 @@ namespace gpu::renderer
         // print them (targets, area, draws, GPU us). 256 passes max.
         const int s_profileFrame = [] { const char* v = std::getenv("NFSMW_PASS_PROFILE"); return v ? std::atoi(v) : -1; }();
         VkQueryPool s_passQueries = VK_NULL_HANDLE;
+        uint64_t s_frame = 0;
         // Per profiled pass, also what was recorded in the gap before it:
         // resolves, texture uploads, submissions, guest memory synced to the
         // GPU copy (KB).
@@ -783,6 +805,7 @@ namespace gpu::renderer
         Submission s_submissions[kSlots];
         uint32_t s_slot = 0;
         uint64_t s_submissionCounter = 1;       // bumps on every submit
+        uint64_t s_completedSubmission = 0;     // guarded by s_submitMutex
         VkDeviceSize s_lastConstantsOffset = 0;
         uint64_t s_lastConstantsSubmission = 0; // submission holding s_lastConstantsOffset
         const void* s_lastConstLayoutVs = nullptr;  // the layout of that upload (see Draw)
@@ -1290,6 +1313,7 @@ namespace gpu::renderer
                     }
                     sub.events.clear();
                     writewatch::SetCompleted(sub.number);
+                    s_completedSubmission = sub.number;
                     s_inFlight.pop_front();
                     timeline::Mark(timeline::Complete, slot);
                     if (s_inFlight.empty())
@@ -1557,8 +1581,14 @@ namespace gpu::renderer
             std::mutex compileMutex;
             bool vertexCompiled = false;
             VkShaderModule module = VK_NULL_HANDLE;  // VS
-            // PS variants by (colour outputs, interpolator inputs, alpha test).
+            // PS variants by (colour outputs, interpolator inputs, alpha test,
+            // Sharper UI's mode: gpu/sharp_ui.h).
             std::unordered_map<uint32_t, VkShaderModule> variants;
+            // A pixel shader with 2D fetches: its microcode (host order), for
+            // Sharper UI's translation, made with its first such pipeline.
+            std::vector<uint32_t> ucode;
+            std::string sharpGlsl;
+            bool sharpTranslated = false;
         };
         std::unordered_map<uint64_t, std::unique_ptr<Shader>> s_shaders;
         Shader* s_vs = nullptr;
@@ -1893,14 +1923,50 @@ namespace gpu::renderer
             return vs.module;
         }
 
-        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest)
+        VkShaderModule PixelVariant(Shader& ps, uint32_t outputs, uint32_t inputs, bool alphaTest,
+            gpu::sharp_ui::Mode sharp = gpu::sharp_ui::Mode::Off, uint32_t uiMask = 0)
         {
-            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0);
+            uint32_t key = (outputs & 0xF) | ((inputs & 0xFFFF) << 4) | (alphaTest ? 1u << 20 : 0) | gpu::sharp_ui::VariantBits(sharp) |
+                ((uiMask & 3u) << 24);
             std::lock_guard lock(ps.compileMutex);
             auto it = ps.variants.find(key);
             if (it != ps.variants.end())
                 return it->second;
+            // Sharper UI: the same microcode translated with its 2D fetches
+            // through sharpTex2D (once per shader; the plain GLSL is left
+            // as it is).
+            const std::string* glsl = &ps.info.glsl;
+            if (sharp != gpu::sharp_ui::Mode::Off)
+            {
+                if (!ps.sharpTranslated)
+                {
+                    ps.sharpTranslated = true;
+                    if (!ps.ucode.empty())
+                    {
+                        gpu::TranslateOptions options;
+                        options.sharpFetch2D = true;
+                        TranslatedShader t = TranslateShader(ps.stage, ps.ucode.data(), ps.ucode.size(), options);
+                        if (t.ok && t.sharpFetches)
+                            ps.sharpGlsl = std::move(t.glsl);
+                    }
+                }
+                if (!ps.sharpGlsl.empty())
+                    glsl = &ps.sharpGlsl;
+                else
+                    sharp = gpu::sharp_ui::Mode::Off;  // nothing to reconstruct: the plain module (its own key)
+            }
             std::string preamble;
+            // NFSMW_SHARP_UI_EXP=1/2 (a diagnostic, the cost's breakdown): sharpTex2D stops after the hardware's
+            // sample, or after its checks (gpu/sharp_ui.h). Measured: neither costs anything; the texel fetches did.
+            static const int sharpExp = [] { const char* v = std::getenv("NFSMW_SHARP_UI_EXP"); return v ? std::atoi(v) : 0; }();
+            if (sharp != gpu::sharp_ui::Mode::Off && (sharpExp == 1 || sharpExp == 2))
+                preamble += std::format("#define SHARP_EXP {}\n", sharpExp);
+            if (sharp == gpu::sharp_ui::Mode::Straight || sharp == gpu::sharp_ui::Mode::Luma)
+                preamble += "#define SHARP_STRAIGHT\n";
+            if (sharp == gpu::sharp_ui::Mode::Luma)
+                preamble += "#define SHARP_SLOT0_ONLY\n";
+            if (sharp != gpu::sharp_ui::Mode::Off && uiMask)
+                preamble += std::format("#define SHARP_UI_MASK {}\n", uiMask & 3u);
             for (int i = 0; i < 4; i++)
                 if (outputs & (1u << i))
                     preamble += std::format("#define OUT{}\n", i);
@@ -1910,7 +1976,7 @@ namespace gpu::renderer
             if (alphaTest)
                 preamble += "#define ALPHA_TEST\n";
             std::string log;
-            auto spirv = CompileGlsl(ps.info.glsl, GLSLANG_STAGE_FRAGMENT, log, preamble);
+            auto spirv = CompileGlsl(*glsl, GLSLANG_STAGE_FRAGMENT, log, preamble);
             VkShaderModule module = VK_NULL_HANDLE;
             if (spirv.empty())
                 fprintf(stderr, "[renderer] ps_%016llx (variant %x): GLSL compile failed:\n%s\n",
@@ -1958,8 +2024,9 @@ namespace gpu::renderer
             uint32_t flags;
             float posScale[4];
             uint32_t vfRedirect[4][4];  // guest start, size, ring offset, 0 (vertex data snapshots)
+            uint32_t constRing;         // the constants' ring offset, for relative reads (constRel)
         };
-        static_assert(sizeof(DrawConstants) == 112);
+        static_assert(sizeof(DrawConstants) == 116);
 
         struct TextureLayout
         {
@@ -1969,7 +2036,7 @@ namespace gpu::renderer
         };
         std::map<std::array<uint32_t, 6>, std::unique_ptr<TextureLayout>> s_textureLayouts;
 
-        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps);
+        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps, bool uiMask = false);
 
         const TextureLayout& GetTextureLayout(const Shader& vs, const Shader& ps)
         {
@@ -1983,12 +2050,25 @@ namespace gpu::renderer
             return *last;
         }
 
-        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps)
+        const TextureLayout& GetUiMaskTextureLayout(const Shader& vs, const Shader& ps)
+        {
+            static const Shader *lastVs = nullptr, *lastPs = nullptr;
+            static const TextureLayout* last = nullptr;
+            if (&vs == lastVs && &ps == lastPs)
+                return *last;
+            lastVs = &vs;
+            lastPs = &ps;
+            last = &GetTextureLayoutUncached(vs, ps, true);
+            return *last;
+        }
+
+        const TextureLayout& GetTextureLayoutUncached(const Shader& vs, const Shader& ps, bool uiMask)
         {
             std::array<uint32_t, 3> v = { vs.info.texture2DMask, vs.info.texture3DMask, vs.info.textureCubeMask };
             std::array<uint32_t, 3> p = { ps.info.texture2DMask, ps.info.texture3DMask, ps.info.textureCubeMask };
             std::array<uint32_t, 6> key = { v[0], v[1], v[2], p[0], p[1], p[2] };
-            auto& slot = s_textureLayouts[key];
+            static std::map<std::array<uint32_t, 6>, std::unique_ptr<TextureLayout>> s_uiMaskLayouts;  // + binding 127 (UI-C)
+            auto& slot = uiMask ? s_uiMaskLayouts[key] : s_textureLayouts[key];
             if (slot)
                 return *slot;
             slot = std::make_unique<TextureLayout>();
@@ -2003,6 +2083,8 @@ namespace gpu::renderer
                     if (stages)
                         bindings.push_back({ d * 32 + n, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, stages, nullptr });
                 }
+            if (uiMask)
+                bindings.push_back({ 127, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr });
             VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
             dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
             dslci.bindingCount = uint32_t(bindings.size());
@@ -2050,6 +2132,42 @@ namespace gpu::renderer
             bool wholeArea = false;
         };
         std::unordered_map<uint64_t, std::unique_ptr<RenderTarget>> s_targets;
+
+        struct ShadowResolveTarget
+        {
+            RenderTarget* source;
+            std::shared_ptr<PooledDepth> depth;
+            gpu::RenderScale scale;
+            uint64_t writeSequence;
+        };
+        std::unordered_map<uint32_t, ShadowResolveTarget> s_shadowTargetsByResolve;
+
+        void InvalidateShadowResolve(RenderTarget* target)
+        {
+            if (!target || !target->depth || target->pitch != 1600)
+                return;
+            std::erase_if(s_shadowTargetsByResolve, [&](const auto& entry) { return entry.second.source == target; });
+        }
+
+        // The device samples D32_SFLOAT_S8_UINT's depth with linear
+        // filtering: a deferred or direct shadow resolve samples the target
+        // itself, which needs it (-1: not asked yet).
+        int s_depthSampleable = -1;
+        VkFormatFeatureFlags s_depthFeatures = 0;
+
+        bool DepthSampleable()
+        {
+            if (s_depthSampleable < 0)
+            {
+                VkFormatProperties fp{};
+                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_D32_SFLOAT_S8_UINT, &fp);
+                constexpr VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                    VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+                s_depthFeatures = fp.optimalTilingFeatures;
+                s_depthSampleable = (s_depthFeatures & need) == need;
+            }
+            return s_depthSampleable == 1;
+        }
 
         VkFormat ColorFormat(uint32_t format)
         {
@@ -2126,9 +2244,10 @@ namespace gpu::renderer
         // Internal resolution. Render targets of the scene's surface pitches
         // (NFSMW_SCALE_PITCH, default 640-1280: the scene, its side-by-side
         // tiles, the road reflection, the final composite) are created at
-        // guest size x (sx, sy) host pixels; the rest (the 1600x1600 shadow
-        // map, the 256x256 cube faces, the bloom and luminance chain from
-        // 320x180 down) stay 1x. The bloom blurs step in texels: at scale
+        // guest size x (sx, sy) host pixels; the sun's 1600x1600 shadow map
+        // has its own Shadow Resolution setting, and the 256x256 cube faces,
+        // bloom and luminance chain from 320x180 down stay 1x. The bloom blurs
+        // step in texels: at scale
         // they cover a fraction of their area and the game's haze thins (the
         // colour grade visibly changed with 320 scaled), and they are blurry
         // by design anyway. Draws keep the guest's viewport transform in guest pixels
@@ -2147,6 +2266,8 @@ namespace gpu::renderer
         // the new scale between two frames, and Auto follows the picture's
         // size (the window, fullscreen, the aspect ratio setting).
         gpu::RenderScale s_renderScale;
+        gpu::RenderScale s_shadowScale;
+        int32_t s_shadowResolutionSetting = settings::kShadowResolutionDefault;
         uint32_t s_scalePitchMin = 640, s_scalePitchMax = 1280;
         uint32_t s_scaleBudget = 6;  // Auto's most host pixels per guest pixel
         bool s_scaleFixed = false;   // NFSMW_RENDER_SCALE: no live changes
@@ -2157,6 +2278,27 @@ namespace gpu::renderer
             const char* v = std::getenv("NFSMW_NATIVE_SHAPE");
             return !(v && v[0] == '0');
         }();
+
+        // The shadow map's scale for Shadow Resolution's `setting`: Auto
+        // (gpu/shadow_auto.h) follows the scene's current scale, so it moves
+        // with Internal Resolution (ApplyLiveSettings).
+        gpu::RenderScale WantedShadowScale(int32_t setting)
+        {
+            return gpu::ShadowScale(setting == settings::kShadowResolutionAuto ? gpu::AutoShadowHalves(s_renderScale, video::ThisSteamDevice()) : uint32_t(setting));
+        }
+
+        // For the log: "2x", "Auto: 2x2 (the scene at 2x2)", or on a Steam
+        // Deck or Frame "Auto: 1x1 (Steam Deck; the scene at 2x2)".
+        std::string ShadowResolutionName()
+        {
+            if (s_shadowResolutionSetting != settings::kShadowResolutionAuto)
+                return gpu::ScaleName(s_shadowScale);
+            const video::SteamDevice device = video::ThisSteamDevice();
+            if (device != video::SteamDevice::Other)
+                return std::format("Auto: {} ({}; the scene at {})", gpu::ScaleName(s_shadowScale),
+                    video::SteamDeviceName(device), gpu::ScaleName(s_renderScale));
+            return std::format("Auto: {} (the scene at {})", gpu::ScaleName(s_shadowScale), gpu::ScaleName(s_renderScale));
+        }
 
         // What the Internal Resolution setting asks for with the picture
         // covering `regionW` x `regionH` of the swapchain.
@@ -2290,16 +2432,24 @@ namespace gpu::renderer
                 video::FrameRegion(regionW, regionH);
                 s_renderScale = WantedRenderScale(setting, regionW, regionH);
             }
+            s_shadowResolutionSetting = settings::GetInt(settings::Id::ShadowResolution);
+            s_shadowScale = WantedShadowScale(s_shadowResolutionSetting);
             if (const char* v = std::getenv("NFSMW_SCALE_PITCH"))
                 sscanf(v, "%u-%u", &s_scalePitchMin, &s_scalePitchMax);
             fprintf(stderr, "[renderer] internal resolution %s (%ux%u, %s; surface pitches %u-%u)\n", gpu::ScaleName(s_renderScale).c_str(),
                 s_renderScale.x.Size(1280), s_renderScale.y.Size(720), ScaleReason(setting, regionW, regionH).c_str(), s_scalePitchMin,
                 s_scalePitchMax);
+            fprintf(stderr, "[renderer] shadow resolution %s\n", ShadowResolutionName().c_str());
         }
 
         bool ScaledPitch(uint32_t pitch)
         {
             return pitch >= s_scalePitchMin && pitch <= s_scalePitchMax;
+        }
+
+        bool ScaledTarget(const RenderTarget& target)
+        {
+            return ScaledPitch(target.pitch) || (target.depth && target.pitch == 1600);
         }
 
         // Untiled rendering draws tile 0 over the whole frame (TileShift).
@@ -2356,6 +2506,8 @@ namespace gpu::renderer
             rt->guestHeight = rows;
             if (ScaledPitch(pitch))
                 rt->scale = s_renderScale;
+            if (depth && pitch == 1600)
+                rt->scale = s_shadowScale;
             // (Rounded up: a pitch that isn't whole blocks at 1.5x still
             // has room for its last host column.)
             rt->width = rt->scale.x.Size(rt->guestWidth);
@@ -2416,6 +2568,7 @@ namespace gpu::renderer
 
         void DestroyTarget(RenderTarget& rt)
         {
+            InvalidateShadowResolve(&rt);
             if (rt.shared)
             {
                 // The pool's (a texture or a deferred resolve may still use it).
@@ -2850,7 +3003,7 @@ namespace gpu::renderer
             uint32_t colorMask;      // 4 bits per target
             uint32_t depthControl;   // RB_DEPTHCONTROL (0 without a depth target, or one attached for the pass only)
             uint32_t raster;         // cull | front CW << 2 | depth clamp << 3 | depth bias << 4
-            uint32_t pad;
+            uint32_t pad;            // bits 0-1: Sharper UI's gpu::sharp_ui::Mode (0: the plain pixel shader); 2-3: its UI mask kind
 
             bool operator==(const PipelineKey& o) const { return memcmp(this, &o, sizeof(*this)) == 0; }
         };
@@ -2922,7 +3075,7 @@ namespace gpu::renderer
                     outputs |= 1u << i;
             uint32_t psRegs = std::min(16u, ps.info.registerCount);
             uint32_t inputs = vs.info.interpolatorMask & ((1u << psRegs) - 1);
-            VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1);
+            VkShaderModule psModule = PixelVariant(ps, outputs, inputs, (key.raster >> 5) & 1, gpu::sharp_ui::Mode(key.pad & 3), (key.pad >> 2) & 3);
             if (!psModule)
                 return VK_NULL_HANDLE;
             stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -3068,7 +3221,7 @@ namespace gpu::renderer
         }();
         const int64_t s_pipelineWaitUs = [] { const char* v = std::getenv("NFSMW_PIPELINE_WAIT_US"); return v ? int64_t(std::atoll(v)) : 3000; }();
         const bool s_logPipelines = std::getenv("NFSMW_PIPELINE_LOG") != nullptr;
-        uint64_t s_frame = 0, s_drawsAtSwap = 0, s_waitPipelinesUntil = 120;  // boot: wait in full
+        uint64_t s_drawsAtSwap = 0, s_waitPipelinesUntil = 120;  // boot: wait in full
         const uint32_t s_shadowExp = [] { const char* v = std::getenv("NFSMW_SHADOW_EXP"); return v ? uint32_t(std::atoi(v)) : 0u; }();
         const bool s_shadowExpAlt = [] { const char* v = std::getenv("NFSMW_SHADOW_EXP_ALT"); return v && v[0] == '1'; }();
         bool ShadowExpOn(uint32_t bit) { return (s_shadowExp & bit) && (!s_shadowExpAlt || s_frame / 120 % 2 == 1); }
@@ -3337,6 +3490,67 @@ namespace gpu::renderer
             }
         };
 
+        // A front-end draw (the menus, the HUD, the loading screens): the
+        // front-end matrix in c0..c3 as the hook left it (x scale, no
+        // rotation, no projection), ePolys at vertex fetch constant 95, and a
+        // vertex shader that reads both (not just inherits them from the HUD
+        // drawn before it: the mirror's picture, a movie quad, a
+        // post-process pass). The edge-bar rules' test, at every screen
+        // shape: the hook keeps the scales at 16:9 too.
+        bool IsFrontEndDraw()
+        {
+            const float feX = game::FrontEndScaleX();
+            if (!(feX > 0.0f))
+                return false;
+            float c[16];
+            memcpy(c, &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(c));
+            const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 95 * 2];
+            if (!(std::fabs(c[0] - feX) <= feX * 1e-5f && c[1] == 0.0f && c[2] == 0.0f && c[12] == 0.0f && c[13] == 0.0f &&
+                    c[14] == 0.0f && c[15] == 1.0f && (vf[0] & 3) == 3))
+                return false;
+            const auto& vi = s_vs->info;
+            return ((vi.vertexFetchConstants[95 / 32] >> (95 % 32)) & 1) && (vi.constRelative || (vi.constUsed[0] & 0xFull) == 0xFull);
+        }
+
+        // Settings > Graphics > Sharper UI (gpu/sharp_ui.h), as this draw
+        // applies it. NFSMW_SHARP_UI_AB=1 (a diagnostic): whatever the
+        // setting, on and off by turns every 4 images (the image this frame
+        // will submit, video::SubmittedImages() + 1: on when bit 2 is set),
+        // so captures a few frames apart pair off and on in one session;
+        // the presenter names each capture's image and state. (Blocks, not
+        // single frames: a capture's read-back holds the next present, so
+        // consecutive captures land 2 images apart.)
+        bool SharpUiOn()
+        {
+            static const bool ab = [] { const char* v = std::getenv("NFSMW_SHARP_UI_AB"); return v && v[0] == '1'; }();
+            if (!ab)
+                return settings::GetBool(settings::Id::SharpUi);
+            return (((video::SubmittedImages() + 1) >> 2) & 1) != 0;
+        }
+
+        // Movie Upscaling's Sharper at a scaled Internal Resolution
+        // (gpu/sharp_ui.h, video/upscale.h): the XMV player's picture is a
+        // clip-space quad (no viewport transform: PA_CL_VTE_CNTL's scale and
+        // offset enables clear) drawn into the scaled target, its 1280x720
+        // (or 1024x576) planes magnified by bilinear filtering; drawn while a
+        // movie plays, it takes sharpTex2D like a front-end draw. (At 1x the
+        // frame reaches the presenter at 1x and its EASU pass does it.)
+        // NFSMW_SHARP_UI_AB=1 turns it on and off with Sharper UI.
+        bool IsMovieDraw()
+        {
+            const int64_t last = game::LastMovieFrameNs();
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            return last > 0 && now >= last && now - last <= 250'000'000 && (Reg<reg::PA_CL_VTE_CNTL>().value & 0x3F) == 0;
+        }
+
+        bool SharpMovieOn()
+        {
+            static const bool ab = [] { const char* v = std::getenv("NFSMW_SHARP_UI_AB"); return v && v[0] == '1'; }();
+            if (!ab)
+                return settings::GetInt(settings::Id::MovieUpscaling) == int32_t(settings::MovieUpscalingMode::Sharper);
+            return (((video::SubmittedImages() + 1) >> 2) & 1) != 0;
+        }
+
         // NFSMW_LOG_COVERS=1 (gpu/covers.h, game/cover_callers.h): the
         // current draw's quads, if it is a front-end draw (the front-end
         // matrix in c0..c3 as the hook left it, ePolys at fetch 95 read by
@@ -3493,6 +3707,98 @@ namespace gpu::renderer
             }
         }
 
+        // NFSMW_SHARP_UI_RECTS=1 (a diagnostic, for Sharper UI's checks): the
+        // host pixels each front-end draw Sharper UI applies to covers (the
+        // bounding box of its vertices, after every rule, in its scissor),
+        // whether or not it is on in that frame, with the largest 2D texture
+        // it samples (":WxH", then "c" when every texture it samples is a
+        // k_8_8_8_8 one of 64x64 or less whose texels are all the same, such
+        // as the game's 32x32 white fill: no filter can change what it
+        // draws); one line per image whose set of boxes differs from
+        // the image before ("from image N"), 20000 lines at most. Outside
+        // them a picture must be the same either way.
+        void NoteSharpRect(uint32_t count, const IndexSource& src, const float posScale[4], const VkRect2D& scissor, float hostW, float hostH)
+        {
+            static const bool on = [] { const char* v = std::getenv("NFSMW_SHARP_UI_RECTS"); return v && v[0] == '1'; }();
+            if (!on || count == 0 || count > 65536)
+                return;
+            static uint64_t image = ~0ull;
+            static std::vector<std::array<int32_t, 7>> current, last;
+            static uint32_t lines = 0;
+            const uint64_t now = video::SubmittedImages() + 1;
+            if (now != image)
+            {
+                std::sort(current.begin(), current.end());
+                current.erase(std::unique(current.begin(), current.end()), current.end());
+                if (image != ~0ull && current != last && lines < 20000)
+                {
+                    lines++;
+                    std::string text;
+                    for (const auto& r : current)
+                        text += std::format(" [{},{})x[{},{}):{}x{}{}", r[0], r[2], r[1], r[3], r[4], r[5], r[6] ? "c" : "");
+                    fprintf(stderr, "[sharp-ui-rects] from image %llu:%s\n", (unsigned long long)image, text.c_str());
+                    last = current;
+                }
+                current.clear();
+                image = now;
+            }
+            float c[8];
+            memcpy(c, &s_regs[XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(c));
+            const uint32_t* vf = &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + 95 * 2];
+            const uint32_t base = vf[0] & 0x1FFFFFFC, endian = vf[1] & 3;
+            const uint32_t words = (vf[1] >> 2) & 0xFFFFFF, first = s_regs[XE_GPU_REG_VGT_INDX_OFFSET];
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const uint32_t v = src.Get(i) + first;
+                if ((v + 1) * 8 > words)
+                    return;
+                float p[3];
+                for (uint32_t j = 0; j < 3; j++)
+                {
+                    const uint32_t b = GpuSwap(LoadPhysical(base + (v * 8 + j) * 4), endian);
+                    memcpy(&p[j], &b, 4);
+                }
+                const float x = p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + c[3];
+                const float y = p[0] * c[4] + p[1] * c[5] + p[2] * c[6] + c[7];
+                x0 = std::min(x0, x);
+                x1 = std::max(x1, x);
+                y0 = std::min(y0, y);
+                y1 = std::max(y1, y);
+            }
+            const gpu::bars::Rect host = gpu::bars::ClipToHost(x0, x1, y0, y1, posScale, hostW, hostH);
+            const gpu::covers::Rect r = gpu::covers::Intersect({ host.x0, host.y0, host.x1, host.y1 },
+                { scissor.offset.x, scissor.offset.y, scissor.offset.x + int32_t(scissor.extent.width), scissor.offset.y + int32_t(scissor.extent.height) });
+            int32_t texW = 0, texH = 0;
+            bool constant = true;
+            for (uint32_t n = 0; n < 32; n++)
+                if ((s_ps->info.texture2DMask >> n) & 1)
+                {
+                    xenos::xe_gpu_texture_fetch_t t;
+                    memcpy(&t, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6], sizeof(t));
+                    const int32_t tw = int32_t(t.size_2d.width) + 1, th = int32_t(t.size_2d.height) + 1;
+                    if (tw * th > texW * texH)
+                    {
+                        texW = tw;
+                        texH = th;
+                    }
+                    if (!constant)
+                        continue;
+                    const uint32_t tBase = (uint32_t(t.base_address) << 12) & 0x1FFFFFFFu, tPitch = uint32_t(t.pitch) << 5;
+                    if (uint32_t(t.format) != 6 || tw > 64 || th > 64 || !tPitch)
+                    {
+                        constant = false;
+                        continue;
+                    }
+                    const uint32_t first = LoadPhysical(tBase + gpu::bars::TexelOffset32(0, 0, tPitch, t.tiled));
+                    for (int32_t y = 0; y < th && constant; y++)
+                        for (int32_t x = 0; x < tw && constant; x++)
+                            constant = LoadPhysical(tBase + gpu::bars::TexelOffset32(uint32_t(x), uint32_t(y), tPitch, t.tiled)) == first;
+                }
+            if (r.x1 > r.x0 && r.y1 > r.y0)
+                current.push_back({ r.x0, r.y0, r.x1, r.y1, texW, texH, constant ? 1 : 0 });
+        }
+
         // Get() for a whole draw, written straight into the ring: `out16`
         // keeps 16-bit indices (the pipeline's restart index is then 0xFFFF,
         // so only when restart is off or the guest's reset index is 0xFFFF);
@@ -3588,9 +3894,9 @@ namespace gpu::renderer
 
         // Stored as resolves write it: one 32-bit word a texel, unconverted
         // (the formats a scaled texture can have).
-        bool ScaledFormat(const TextureFormatInfo& fi)
+        bool ScaledFormat(const TextureFormatInfo& fi, bool shadowMap)
         {
-            return fi.bpbLog2 == 2 && fi.convert == 0 && fi.block == 1;
+            return fi.bpbLog2 == 2 && (fi.convert == 0 || (shadowMap && fi.convert == 4)) && fi.block == 1;
         }
 
         uint32_t Tiled2D(uint32_t x, uint32_t y, uint32_t pitchAligned, uint32_t bppLog2)
@@ -4010,6 +4316,7 @@ void main()
             uint32_t levels = 1;
             uint32_t mipStart = 0, mipSize = 0;  // the mip levels' guest memory (size 0: none)
             bool scaled = false;  // host resolution, from the scaled resolve memory
+            bool shadowMap = false;
             uint32_t guestWidth = 0, guestHeight = 0;  // scaled: its guest size (width, height are the host's)
             uint64_t scaledSig = 0;  // scaled: ScaledSignature
             VkImageView storeView = VK_NULL_HANDLE;  // scaled: R32_UINT, stored into by the untile (if the device can)
@@ -4336,7 +4643,22 @@ void main()
             // while command buffers in flight keep theirs (never destroyed).
             int anisotropy = settings::GetInt(settings::Id::Anisotropy);
             if (anisotropy == settings::kAnisotropyAuto)
-                anisotropy = s_autoAnisotropy;
+            {
+                anisotropy = gpu::AutoAnisotropy(s_autoAnisotropy, gpu::kAnisotropyMac, gpu::SceneAtOneX(s_renderScale));
+                static int logged = -2;
+                if (anisotropy != logged)
+                {
+                    logged = anisotropy;
+                    fprintf(stderr, "[renderer] anisotropic filtering Auto: %dx%s\n", anisotropy,
+                        anisotropy != s_autoAnisotropy ? " (a Mac at 1x Internal Resolution)" : "");
+                }
+            }
+            // Depth (k_24_8, k_24_8_FLOAT: the sun's shadow map) keeps the
+            // game's own anisotropy: filtered along a line, its depths are
+            // averaged across a decal's edge, and the shadow test there
+            // reads a lit outline (#70: AMD GPUs at 16x).
+            if (uint32_t(f.format) == 22 || uint32_t(f.format) == 23)
+                anisotropy = settings::kAnisotropyGame;
             uint64_t key = uint64_t(f.clamp_x) | (uint64_t(f.clamp_y) << 3) | (uint64_t(f.clamp_z) << 6) |
                 (uint64_t(f.mag_filter) << 9) | (uint64_t(f.min_filter) << 11) | (uint64_t(f.border_color) << 13) |
                 (uint64_t(f.mip_filter) << 15) | (uint64_t(f.aniso_filter) << 17) | (uint64_t(f.mip_min_level) << 20) |
@@ -4595,6 +4917,27 @@ void main()
                     mipSize = std::min(mipSize, uint32_t(kSharedSize) - mipBase);
                 }
             }
+            const bool shadowMap = !cube && !volume && format == 22 && width == 1600 && height == 1600 &&
+                pitchTexels == 1600 && maxLevel == 0;
+            if (shadowMap)
+            {
+                auto it = s_shadowTargetsByResolve.find(base);
+                const ShadowResolveTarget* resolved = it == s_shadowTargetsByResolve.end() ? nullptr : &it->second;
+                uint64_t sampleSequence = 0;
+                if (resolved)
+                {
+                    sampleSequence = writewatch::WriteSequence(base, size);
+                    if (resolved->scale == s_shadowScale && resolved->depth && resolved->depth->sampleView &&
+                        DepthSampleable() && f.tiled && pitchTexels == 1600 &&
+                        ((f.endianness == xenos::Endian::kNone && f.swizzle == 0x688) ||
+                            (f.endianness == xenos::Endian::k8in32 && f.swizzle == 0xB48)) &&
+                        sampleSequence == it->second.writeSequence)
+                    {
+                        sampler = GetSampler(f, maxLevel);
+                        return resolved->depth->sampleView;
+                    }
+                }
+            }
             // Drawn into scaled targets: a texture that scaled resolves wrote
             // (and nothing since) is sampled at host resolution, base level
             // only (resolved surfaces have no mips).
@@ -4602,8 +4945,8 @@ void main()
             // At 1.5x only a texture of whole 2x2 blocks (even width and
             // height; gpu/render_scale.h).
             bool scaledCandidate = !cube && !volume && f.tiled && layers == 1 && !f.stacked &&
-                ScaledFormat(fi) && offX == 0 && offY == 0 && maxLevel == 0 && s_scaled.scale.Exact(width, height) &&
-                s_scaled.scale.HostPixels(width, height) * 4 <= s_scaled.scratchSize;
+                ScaledFormat(fi, shadowMap) && offX == 0 && offY == 0 && maxLevel == 0 && s_scaled.scale.Exact(width, height) &&
+                (s_scaled.direct || s_scaled.scale.HostPixels(width, height) * 4 <= s_scaled.scratchSize);
             // Which scaled texture this is (its cache key's surface fields):
             // pages only a scaled texture holds are current for it alone.
             const uint64_t sig = ScaledSignature(format, width, height, pitchAligned, uint32_t(f.endianness));
@@ -4623,10 +4966,12 @@ void main()
                 slotRef = std::make_unique<Texture>();
                 Texture& t = *slotRef;
                 t.format = fi.vk;
+                t.convert = fi.convert;
                 t.width = width;
                 t.height = height;
                 t.guestStart = base;
                 t.guestSize = size;
+                t.shadowMap = shadowMap;
                 t.cube = cube;
                 t.volume = volume;
                 t.layers = layers;
@@ -5230,9 +5575,9 @@ void main()
             // A scaled resolve's samples also into a cached scaled texture
             // (binding 5), where its untile would have put them (see
             // Resolve): hostX, hostY: the destination's texel 0,0 in it; its
-            // guest size and endianness. Pushed (and in the shader:
-            // SCALED_FUSE) only to the pipelines of scaled sources.
-            uint32_t hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian;
+            // guest size, endianness, and format conversion. Pushed (and in
+            // the shader: SCALED_FUSE) only to pipelines of scaled sources.
+            uint32_t hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian, hostConvert;
         };
         // The constants pushed to the resolve shader: without NFSMW_FUSE_PARTIAL
         // and NFSMW_DIRECT_CUBE, those before texX, as before them, and the
@@ -5270,7 +5615,7 @@ layout(push_constant) uniform P
     // Also each host sample into a cached scaled texture (binding 5) where
     // its untile would put it: its texel of the destination's 0,0 (whole
     // tiles), its guest size, its endianness.
-    uint hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian;
+    uint hostWrite, hostX, hostY, hostWidth, hostHeight, hostEndian, hostConvert;
 #endif
 } p;
 )" GLSL_SCALE_CODE R"(
@@ -5533,7 +5878,12 @@ void main()
                         uint hx = sbReaderHost(tx, subX, i, p.scale.x, kDen.x), hy = sbReaderHost(ty, subY, j, p.scale.y, kDen.y);
 #endif
                         if (hx != ~0u && hy != ~0u)
-                            imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(swapWord(word32, p.hostEndian), 0u, 0u, 0u));
+                        {
+                            uint hostWord = swapWord(word32, p.hostEndian);
+                            if (p.hostConvert == 4u)
+                                hostWord = floatBitsToUint(float(hostWord >> 8) / 16777215.0);
+                            imageStore(h_image, ivec2(int(hx), int(hy)), uvec4(hostWord, 0u, 0u, 0u));
+                        }
                     }
 #endif
                 }
@@ -5978,15 +6328,18 @@ void main()
 
         // ---------------------------------------------------------------
         // Deferred shadow resolves (gpu/shadow_lend.h). NFSMW_SHADOW_DEFER=1
-        // (default on Apple and Android, the tile GPUs; 0 off, alt: in odd
-        // 120-frame [perf] windows only, for A/B in one run) where the device
-        // samples its depth format with linear filtering.
+        // (default on Apple and Android, the tile GPUs, and on Windows, where
+        // an Intel UHD 620 measured 4.4-5 ms less GPU time a frame in menus
+        // and 1.4-2.9 ms in races; 0 off, alt: in odd 120-frame [perf]
+        // windows only, for A/B in one run) where the device samples its
+        // depth format with linear filtering. Elsewhere (Linux, SteamOS)
+        // it stays off until measured there.
         // NFSMW_SHADOW_VERIFY=1: each deferred resolve also runs (so the
         // texture's own image holds the resolve's texels) and a compute pass
         // compares every texel with the lent depth image; the [shadow] line
         // counts texels and those whose stored value isn't exactly the
         // resolve's packing of the lent depth.
-#if defined(__APPLE__) || defined(__ANDROID__)
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(_WIN32)
         constexpr int kShadowDeferDefault = 1;
 #else
         constexpr int kShadowDeferDefault = 0;
@@ -5996,24 +6349,20 @@ void main()
             return !v ? kShadowDeferDefault : std::strcmp(v, "alt") == 0 ? 2 : v[0] == '1' ? 1 : 0;
         }();
         const bool s_shadowVerify = [] { const char* v = std::getenv("NFSMW_SHADOW_VERIFY"); return v && v[0] == '1'; }();
-        int s_depthSampleable = -1;  // the device samples D32_SFLOAT_S8_UINT's depth with linear filtering (-1: not asked yet)
-
         bool ShadowDeferOn()
         {
             if (!s_shadowDefer || s_logShadowMap || s_textureVerify || s_exp != 0 || (s_shadowDefer == 2 && s_frame / 120 % 2 == 0))
                 return false;
-            if (s_depthSampleable < 0)
+            static bool logged = false;
+            const bool sampleable = DepthSampleable();
+            if (!logged)
             {
-                VkFormatProperties fp{};
-                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_D32_SFLOAT_S8_UINT, &fp);
-                constexpr VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
-                    VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
-                s_depthSampleable = (fp.optimalTilingFeatures & need) == need;
+                logged = true;
                 fprintf(stderr, "[renderer] deferred shadow resolves%s: D32_SFLOAT_S8_UINT features 0x%x (%s)\n",
-                    s_shadowDefer == 2 ? " (NFSMW_SHADOW_DEFER=alt: odd windows)" : "", unsigned(fp.optimalTilingFeatures),
-                    s_depthSampleable ? "its depth sampled in place" : "no linear filtering of depth: resolved as before");
+                    s_shadowDefer == 2 ? " (NFSMW_SHADOW_DEFER=alt: odd windows)" : "", unsigned(s_depthFeatures),
+                    sampleable ? "its depth sampled in place" : "no linear filtering of depth: resolved as before");
             }
-            return s_depthSampleable == 1;
+            return sampleable;
         }
 
         struct ShadowLend
@@ -6210,6 +6559,8 @@ void main()
         void LendTargetWrite(RenderTarget* rt, bool whole)
         {
             const bool lent = rt->shared && rt->shared.use_count() > 1;
+            const bool directShadowSnapshot = rt->shared && std::any_of(s_shadowTargetsByResolve.begin(), s_shadowTargetsByResolve.end(),
+                [&](const auto& entry) { return entry.second.depth == rt->shared; });
             switch (gpu::shadow_lend::BeforeTargetWrite(lent, whole))
             {
             case gpu::shadow_lend::TargetWrite::kInPlace:
@@ -6218,10 +6569,11 @@ void main()
                 FreshTargetImage(*rt);
                 return;
             case gpu::shadow_lend::TargetWrite::kRunDeferred:
-                if (s_shadowCopy)
+                if (s_shadowCopy || directShadowSnapshot)
                 {
                     // NFSMW_SHADOW_COPY=1: the target goes on in a copy of
-                    // its image instead; the resolves stay deferred.
+                    // its image instead; or, a direct shadow sample still
+                    // uses this image, so preserve it while rendering on.
                     std::shared_ptr<PooledDepth> old = rt->shared;
                     FreshTargetImage(*rt);
                     FullBarrier();
@@ -6584,15 +6936,28 @@ void main()
                     const bool wholeBlocks = (r.x0 + shiftX) >= 0 && (r.y0 + shiftY) >= 0 &&
                         source->scale.x.Exact(uint32_t(r.x0 + shiftX)) && source->scale.y.Exact(uint32_t(r.y0 + shiftY)) &&
                         source->scale.x.Exact(uint32_t(r.x0)) && source->scale.y.Exact(uint32_t(r.y0));
+                    const bool directShadowEndian = uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::kNone) ||
+                        uint32_t(destInfo.copy_dest_endian) == uint32_t(xenos::Endian::k8in32);
+                    const bool directShadowResolve = depthSource && source->depth && source->pitch == 1600 &&
+                        source->scale == s_shadowScale && !source->scale.IsOne() && format == 22 &&
+                        !destInfo.copy_dest_array && directShadowEndian &&
+                        !destInfo.copy_dest_swap && destInfo.copy_dest_exp_bias == 0 && rc.destPitch == 1600 &&
+                        r.x0 == 0 && r.y0 == 0 && r.x1 == 1600 && r.y1 == 1600;
                     if (!wholeBlocks)
                         LogOnce(0x2500, "resolve at (%d,%d) (tile shift %d,%d) from a %s target isn't whole blocks: kept at 1x only, "
                             "its 1x average up to half a host pixel off", r.x0, r.y0, shiftX, shiftY, gpu::ScaleName(source->scale).c_str());
                     uint32_t bl = ResolveBppLog2(format);
                     uint32_t firstPage = rangeBase >> 12;
                     uint32_t lastPage = std::min<uint32_t>((rangeBase + rangeBytes - 1) >> 12, kGuestPages - 1);
-                    // A 32-bit resolve from a scaled target keeps its samples.
+                    // Retain a scaled-memory fallback only at the target's
+                    // scale; the shadow texture samples its render target
+                    // directly when the scene and shadow scales differ.
+                    const bool shadowFallbackWanted = directShadowResolve && !s_renderScale.IsOne();
+                    const bool scaledTextureWanted = !directShadowResolve && ScaledWanted(rangeBase, rangeBytes);
+                    const bool scaledMemoryNeeded = shadowFallbackWanted || (!directShadowResolve && !source->scale.IsOne() && source->scale == s_renderScale);
+                    const bool scaledMemoryReady = scaledMemoryNeeded && EnsureScaledMemory() && source->scale == s_scaled.scale;
                     bool scaledWrite = !source->scale.IsOne() && wholeBlocks && bl == 2 && !destInfo.copy_dest_array &&
-                        EnsureScaledMemory() && source->scale == s_scaled.scale && ScaledWanted(rangeBase, rangeBytes);
+                        scaledMemoryReady && (shadowFallbackWanted || scaledTextureWanted);
                     bool freshSlots = false;  // a page here had no current scaled copy before this
                     // Pages whose samples only a scaled texture holds (see
                     // below): their slots are filled from the 1x data too
@@ -6746,7 +7111,7 @@ void main()
                     const char* unhosted = !scaledWrite ? nullptr : !s_scaledFuse || !s_resolveToTexture ? "off"
                         : freshSlots ? "fresh slots" : "no scaled texture there";
                     uint32_t hostX = 0, hostY = 0;
-                    if (scaledWrite && s_scaledFuse && s_resolveToTexture && !freshSlots)
+                    if (scaledWrite && source->scale == s_scaled.scale && s_scaledFuse && s_resolveToTexture && !freshSlots)
                         for (auto it = s_scaledByStart.upper_bound(rc.destBase); !hosted && it != s_scaledByStart.begin();)
                         {
                             if (rc.destBase - (--it)->first >= s_maxScaledSize)
@@ -6805,6 +7170,7 @@ void main()
                         rc.hostWidth = hosted->guestWidth;
                         rc.hostHeight = hosted->guestHeight;
                         rc.hostEndian = hosted->endian;
+                        rc.hostConvert = hosted->convert;
                         LogOnce(0x2900, "scaled resolves store into cached scaled textures too (the first: %ux%u host at %08X, texels from %u,%u)",
                             hosted->width, hosted->height, rc.destBase, hostX, hostY);
                     }
@@ -6940,7 +7306,8 @@ void main()
                     w[5] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 5, 0, 1,
                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
                     s_stateEpoch++;
-                    bool coalesced = scaledWrite && s_scaled.coalesce && CoalescedFits(source->scale);  // 32x2 pixels a group
+                    bool coalesced = scaledWrite && source->scale == s_scaled.scale && s_scaled.coalesce &&
+                        CoalescedFits(source->scale);  // 32x2 pixels a group
                     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ResolvePipeline(coalesced, source->scale));
                     s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_resolveLayout, 0, AddSharedParts(w, 6), w);
                     vkCmdPushConstants(s_cmd, s_resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
@@ -6985,6 +7352,24 @@ void main()
                     uint64_t written = writewatch::MarkWritten(rangeBase, rangeBytes, writewatch::Writer::kResolve, rc.destBase);
                     if (defer)
                         s_lends.back().written = written;
+                    if (directShadowResolve && !(s_exp & 2))
+                    {
+                        uint64_t writeSequence = writewatch::WriteSequence(rangeBase, rangeBytes);
+                        if (writeSequence)
+                        {
+                            if (!source->shared)
+                            {
+                                auto* d = new PooledDepth;
+                                d->image = source->image;
+                                d->sampleView = source->sampleView;
+                                d->format = source->vkFormat;
+                                d->width = source->width;
+                                d->height = source->height;
+                                source->shared = ShareDepth(d);
+                            }
+                            s_shadowTargetsByResolve[rc.destBase] = { source, source->shared, source->scale, writeSequence };
+                        }
+                    }
                     // The fused texture holds this write: its pages' sequence
                     // now, and any write after it is newer (0: per-page
                     // sequences, NFSMW_WATCH_RANGES=0, so it is loaded again).
@@ -7157,7 +7542,7 @@ layout(set = 0, binding = 2, r32ui) writeonly uniform uimage2D o_image;
 #endif
 // width, height: the texture's host size (whole blocks); scale / den: host
 // pixels per guest pixel (a den above 2: a texel axis).
-layout(push_constant) uniform P { uint base, pitch, width, height, endian, slotWords; uvec2 scale, den; } p;
+layout(push_constant) uniform P { uint base, pitch, width, height, endian, slotWords; uvec2 scale, den; uint convert; } p;
 )" GLSL_SCALE_CODE R"(
 uint tiled2D(uint x, uint y, uint pitch, uint bppLog2)
 {
@@ -7187,10 +7572,13 @@ void main()
     if (slot != 0u)
         v = s_pool[(slot - 1u) * p.slotWords + sbSampleWord((a & 4095u) >> 2, sbBlockSample(h.x, p.scale.x, p.den.x),
             sbBlockSample(h.y, p.scale.y, p.den.y), p.scale.x, p.scale.y, p.den.x, p.den.y)];
+    v = swapWord(v, p.endian);
+    if (p.convert == 4u)
+        v = floatBitsToUint(float(v >> 8) / 16777215.0);
 #ifdef TO_BUFFER
-    o_mem[h.y * w + h.x] = swapWord(v, p.endian);
+    o_mem[h.y * w + h.x] = v;
 #else
-    imageStore(o_image, ivec2(h), uvec4(swapWord(v, p.endian)));
+    imageStore(o_image, ivec2(h), uvec4(v));
 #endif
 }
 )";
@@ -7327,15 +7715,17 @@ void main()
             if (const char* v = std::getenv("NFSMW_SCALED_RESOLVE"); v && v[0] == '0')
                 return false;
             auto start = std::chrono::steady_clock::now();
-            s_scaled.scale = s_renderScale;
+            s_scaled.scale = s_renderScale.IsOne() ? s_shadowScale : s_renderScale;
             if (s_scaled.scale.IsOne())
                 return false;
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(s_vk->physical, &props);
-            // gpu::ScaledPoolMegabytes: 512 MB on a discrete GPU, 128 MB at a
-            // Steam Deck's native rows (1x10/9: 512 MB took ~510 MB more VRAM
-            // than 1x, and 128 MB the same GPU time, 450 MB less).
+            // gpu::ScaledPoolMegabytes sizes the scene pool. When this pool
+            // also stores shadows at their own scale, ShadowPoolMegabytes
+            // supplies the 256 MB (1.5x) or 384 MB (2x) minimum.
             uint64_t megabytes = gpu::ScaledPoolMegabytes(s_scaled.scale, props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+            if (s_scaled.scale == s_shadowScale)
+                megabytes = std::max(megabytes, gpu::ShadowPoolMegabytes(s_shadowScale));
             if (const char* v = std::getenv("NFSMW_SCALED_MB"))
                 megabytes = std::clamp<uint64_t>(std::strtoull(v, nullptr, 10), 16, 4096);
             // Kept across live changes of the internal resolution
@@ -7356,13 +7746,14 @@ void main()
             }
             s_scaled.slotWords = s_scaled.scale.SlotWords();
             s_scaled.slots = uint32_t(std::min<uint64_t>(poolSize / (4ull * s_scaled.slotWords), kGuestPages));
-            // Scaled textures up to 1280x1024 (at scale). The untile stores
+            // Scaled textures up to 1600x1600 (at scale), including shadow
+            // maps. The untile stores
             // into them through an R32_UINT view when the device can for every
             // scaled format (a mutable-format image with extended usage: the
             // format itself needn't be storable); otherwise they load through
             // a scratch buffer that size (the ring's slots are too small) and a
             // copy, one more full write and read of the texture.
-            s_scaled.scratchSize = VkDeviceSize(s_scaled.scale.HostPixels(1280, 1024)) * 4;
+            s_scaled.scratchSize = VkDeviceSize(s_scaled.scale.HostPixels(1600, 1600)) * 4;
             {
                 // (The image's format list is Vulkan 1.2.)
                 const char* v = std::getenv("NFSMW_SCALED_DIRECT");
@@ -7374,7 +7765,7 @@ void main()
                 {
                     TextureFormatInfo fi;
                     VkImageFormatProperties ifp;
-                    if (GetTextureFormat(f, fi) && ScaledFormat(fi))
+                    if (GetTextureFormat(f, fi) && ScaledFormat(fi, fi.convert == 4))
                         s_scaled.direct = vkGetPhysicalDeviceImageFormatProperties(s_vk->physical, fi.vk, VK_IMAGE_TYPE_2D,
                             VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
                             VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT, &ifp) == VK_SUCCESS;
@@ -7425,11 +7816,11 @@ void main()
             {
                 b[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                 if (!s_scaledStorePipeline)
-                    CreateComputePipeline(kScaledUntileGlsl, b, 3, 10 * sizeof(uint32_t), s_scaledStoreSetLayout, s_scaledStoreLayout,
+                    CreateComputePipeline(kScaledUntileGlsl, b, 3, 11 * sizeof(uint32_t), s_scaledStoreSetLayout, s_scaledStoreLayout,
                         s_scaledStorePipeline);
             }
             else if (!s_scaledUntilePipeline)
-                CreateComputePipeline(kScaledUntileGlsl, b, 3, 10 * sizeof(uint32_t), s_scaledUntileSetLayout, s_scaledUntileLayout,
+                CreateComputePipeline(kScaledUntileGlsl, b, 3, 11 * sizeof(uint32_t), s_scaledUntileSetLayout, s_scaledUntileLayout,
                     s_scaledUntilePipeline, "#define TO_BUFFER\n");
             EndPass();
             Begin();
@@ -7481,8 +7872,8 @@ void main()
                 w[k] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, k, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     nullptr, &bi[k], nullptr };
             const gpu::RenderScale& sc = s_scaled.scale;
-            struct { uint32_t base, pitch, width, height, endian, slotWords, scaleX, scaleY, denX, denY; } pc = { base, pitchBlocks,
-                t.width, t.height, endian, s_scaled.slotWords, sc.x.num, sc.y.num, sc.x.den, sc.y.den };
+            struct { uint32_t base, pitch, width, height, endian, slotWords, scaleX, scaleY, denX, denY, convert; } pc = { base, pitchBlocks,
+                t.width, t.height, endian, s_scaled.slotWords, sc.x.num, sc.y.num, sc.x.den, sc.y.den, t.convert };
             s_stateEpoch++;
             if (t.storeView)
             {
@@ -7626,6 +8017,93 @@ void main()
         VkPipeline s_frontPipeline = VK_NULL_HANDLE;
         VkPipelineLayout s_frontLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout s_frontSetLayout = VK_NULL_HANDLE;
+
+        // UI-C (gpu/sharp_ui.h kUiMaskStoreGlsl, video/presenter.cpp's UI
+        // pass): front-end variants record their coverage into `accum`
+        // (R32UI, the scaled frame's host pixels; imageAtomicMax), and with
+        // each scaled front image a compute pass turns it into an R8 weight
+        // image (each pixel the most of its 3x3: a glyph's soft edge weighs
+        // as its middle does), handed to the presenter, then clears it.
+        // NFSMW_UI_MASK=0 turns it off (on with Sharper UI otherwise).
+        struct UiMaskState
+        {
+            bool checked = false, supported = false;
+            Image accum;
+            uint32_t accumW = 0, accumH = 0;
+            Image out[2];
+            uint32_t outW = 0, outH = 0, next = 0;
+            bool written = false;  // a draw wrote into accum since the last front image
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        } s_uiMask;
+
+        const char* kUiMaskGlsl = R"(#version 460
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D accum;
+layout(set = 0, binding = 1, r8) uniform writeonly image2D weights;
+layout(push_constant) uniform P { ivec2 size; } p;
+void main()
+{
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, p.size)))
+        return;
+    ivec2 lim = imageSize(accum) - 1;
+    uint m = 0u;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++)
+            m = max(m, imageLoad(accum, clamp(g + ivec2(x, y), ivec2(0), lim)).r);
+    imageStore(weights, g, vec4(float(m) / 255.0));
+}
+)";
+
+        bool UiMaskWanted()
+        {
+            static const bool env = [] { const char* v = std::getenv("NFSMW_UI_MASK"); return !(v && v[0] == '0'); }();
+            if (!env)
+                return false;
+            if (!s_uiMask.checked)
+            {
+                s_uiMask.checked = true;
+                VkPhysicalDeviceFeatures features;
+                vkGetPhysicalDeviceFeatures(s_vk->physical, &features);
+                VkFormatProperties r8, r32;
+                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_R8_UNORM, &r8);
+                vkGetPhysicalDeviceFormatProperties(s_vk->physical, VK_FORMAT_R32_UINT, &r32);
+                s_uiMask.supported = features.fragmentStoresAndAtomics &&
+                    (r8.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) &&
+                    (r32.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT);
+                fprintf(stderr, "[renderer] UI mask (Sharper UI's presenter pass): %s\n",
+                    s_uiMask.supported ? "available" : "unavailable (fragment atomics or R8 storage missing)");
+            }
+            return s_uiMask.supported;
+        }
+
+        // The accumulator and the two weight images, the scaled front
+        // image's size, made at a front image (passes ended); draws use them
+        // once they exist.
+        void EnsureUiMaskImages(uint32_t w, uint32_t h)
+        {
+            if (w == s_uiMask.accumW && h == s_uiMask.accumH && s_uiMask.accum.view)
+                return;
+            // (A new size: the old ones may be in flight; kept, not destroyed. Rare: a resolution change.)
+            s_uiMask.accumW = s_uiMask.outW = w;
+            s_uiMask.accumH = s_uiMask.outH = h;
+            s_uiMask.accum = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R32_UINT, { w, h, 1 }, 1,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
+            for (Image& o : s_uiMask.out)
+                o = CreateImage(VK_IMAGE_TYPE_2D, VK_FORMAT_R8_UNORM, { w, h, 1 }, 1, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
+            ToGeneral(s_uiMask.accum.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            for (Image& o : s_uiMask.out)
+                ToGeneral(o.image, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            VkClearColorValue zero{};
+            VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdClearColorImage(s_cmd, s_uiMask.accum.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+            FullBarrier();
+            s_uiMask.written = false;
+            fprintf(stderr, "[renderer] UI mask images %ux%u\n", w, h);
+        }
         // The same for a texel axis's scale, made for that exact scale
         // (SB_FIXED_*) at its first scaled present (Steam Deck 1x10/9: the
         // divisions by the push constants were most of the front's cost).
@@ -7987,7 +8465,16 @@ void main()
             bci.pNext = &embci;
             bci.size = kSharedSize;
             bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            Check(vkCreateBuffer(s_dev, &bci, nullptr, &s_shared), "vkCreateBuffer(shared)");
+            if (VkResult r = vkCreateBuffer(s_dev, &bci, nullptr, &s_shared); r != VK_SUCCESS)
+            {
+                // (MoltenVK 1.2 on a discrete GPU, an Intel Mac's AMD card,
+                // takes the host pointer above and then refuses a buffer for
+                // it: VK_ERROR_FEATURE_NOT_PRESENT; 1.4.2 imports. The copy
+                // comes next.)
+                fprintf(stderr, "[renderer] importing guest memory failed: the driver refuses a buffer of host memory (%d)\n", int(r));
+                s_shared = VK_NULL_HANDLE;
+                return false;
+            }
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(s_dev, s_shared, &req);
 
@@ -8159,6 +8646,15 @@ void main()
             }
             in.importable = s_vk->getMemoryHostPointerProperties != nullptr;
             in.importRefusal = memplan::ImportRefusal(DriverId(props));
+            // Issue #67: pixel shaders keep registers in separate variables on
+            // AMD's own driver (2 = bit 1 only; NFSMW_SCALAR_REGS=0..3 overrides;
+            // see ScalarRegisters()). Testers on RX 6750 XT: 3 and 2 fixed the
+            // far verge grass, 0 and 1 (vertex shaders only) left it black, so
+            // vertex shaders keep the array everywhere.
+            gpu::SetScalarRegistersDefault(DriverId(props) == VK_DRIVER_ID_AMD_PROPRIETARY ? 2u : 0u);
+            fprintf(stderr, "[renderer] shader registers: %s\n",
+                gpu::ScalarRegisters() == 3u ? "variables" : gpu::ScalarRegisters() == 0u ? "array"
+                : gpu::ScalarRegisters() == 1u ? "variables in vertex shaders" : "variables in pixel shaders");
             in.overrides = memplan::ParseOverrides(std::getenv("NFSMW_SHARED_MEMORY"), std::getenv("NFSMW_SHADOW_MEMORY"),
                 std::getenv("NFSMW_RING_MEMORY"));
             VkMemoryRequirements req;
@@ -8443,12 +8939,16 @@ void main()
             const gpu::RenderScale old = s_renderScale;
             Flush();
             s_renderScale = scale;
+            s_shadowTargetsByResolve.clear();
             PrewarmResolvePipelines(scale);
+            if (scale != s_shadowScale)
+                PrewarmResolvePipelines(s_shadowScale);
             size_t targets = 0;
             for (auto& [key, slot] : s_targets)
             {
                 RenderTarget& was = *slot;  // (keyed as before: the key has no scale)
-                if (!ScaledPitch(was.pitch) || was.scale == scale)
+                const gpu::RenderScale targetScale = was.depth && was.pitch == 1600 ? s_shadowScale : scale;
+                if (!ScaledTarget(was) || was.scale == targetScale)
                     continue;
                 // Clears still waiting for their target's next pass, in guest
                 // pixels (their host edges came from guest ones: GuestEdge
@@ -8470,7 +8970,7 @@ void main()
                 for (PendingClear& pc : moved)
                 {
                     pc.rt = slot.get();
-                    pc.rect = HostRect(scale, pc.rect.offset.x, pc.rect.offset.y, pc.rect.offset.x + int32_t(pc.rect.extent.width),
+                    pc.rect = HostRect(targetScale, pc.rect.offset.x, pc.rect.offset.y, pc.rect.offset.x + int32_t(pc.rect.extent.width),
                         pc.rect.offset.y + int32_t(pc.rect.extent.height));
                     s_pendingClears.push_back(pc);
                 }
@@ -8483,6 +8983,70 @@ void main()
             fprintf(stderr, "[renderer] internal resolution %s -> %s (%ux%u, %s): %zu targets and %zu scaled textures replaced in %.1f ms\n",
                 gpu::ScaleName(old).c_str(), gpu::ScaleName(scale).c_str(), scale.x.Size(1280), scale.y.Size(720), how.c_str(), targets, textures,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+
+        void ApplyShadowResolution(int32_t setting)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            const gpu::RenderScale old = s_shadowScale;
+            s_shadowResolutionSetting = setting;
+            if (WantedShadowScale(setting) == old)
+            {
+                // Auto at the scale it had (1x <-> Auto at 1x): nothing to replace.
+                fprintf(stderr, "[renderer] shadow resolution %s\n", ShadowResolutionName().c_str());
+                return;
+            }
+            Flush();
+            s_shadowScale = WantedShadowScale(setting);
+            s_shadowTargetsByResolve.clear();
+            PrewarmResolvePipelines(s_shadowScale);
+            size_t targets = 0;
+            for (auto& [key, slot] : s_targets)
+            {
+                RenderTarget& was = *slot;
+                if (!was.depth || was.pitch != 1600 || was.scale == s_shadowScale)
+                    continue;
+
+                std::vector<PendingClear> moved;
+                std::erase_if(s_pendingClears, [&](const PendingClear& pc) {
+                    if (pc.rt != &was)
+                        return false;
+                    const uint32_t x0 = was.scale.x.GuestEdge(uint32_t(pc.rect.offset.x));
+                    const uint32_t y0 = was.scale.y.GuestEdge(uint32_t(pc.rect.offset.y));
+                    const uint32_t x1 = was.scale.x.GuestEdge(uint32_t(pc.rect.offset.x) + pc.rect.extent.width);
+                    const uint32_t y1 = was.scale.y.GuestEdge(uint32_t(pc.rect.offset.y) + pc.rect.extent.height);
+                    moved.push_back({ nullptr, { { int32_t(x0), int32_t(y0) }, { x1 - x0, y1 - y0 } }, pc.value });
+                    return true;
+                });
+                const uint32_t base = was.base, format = was.format, pitch = was.pitch;
+                const bool depth = was.depth, wide = was.wide;
+                DestroyTarget(was);
+                slot = CreateTarget(base, format, depth, pitch, wide);
+                for (PendingClear& pc : moved)
+                {
+                    pc.rt = slot.get();
+                    pc.rect = HostRect(s_shadowScale, pc.rect.offset.x, pc.rect.offset.y,
+                        pc.rect.offset.x + int32_t(pc.rect.extent.width), pc.rect.offset.y + int32_t(pc.rect.extent.height));
+                    s_pendingClears.push_back(pc);
+                }
+                targets++;
+            }
+            for (RecentTarget& recent : s_recentTargets)
+                recent = {};
+            const size_t textures = DropTextures([](const Texture& t) { return t.shadowMap; });
+            DrainDepthPool();
+            ResetScaledMemory(!s_renderScale.IsOne());
+            fprintf(stderr, "[renderer] shadow resolution %s: %zu targets and %zu shadow textures replaced in %.1f ms\n",
+                ShadowResolutionName().c_str(), targets, textures,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+
+        // The setting changed, or Auto's scale did with the scene's.
+        void UpdateShadowResolution()
+        {
+            const int32_t setting = settings::GetInt(settings::Id::ShadowResolution);
+            if (setting != s_shadowResolutionSetting || !(WantedShadowScale(setting) == s_shadowScale))
+                ApplyShadowResolution(setting);
         }
 
         void ApplyMipmaps(bool mips)
@@ -8514,6 +9078,7 @@ void main()
                 if (mips != s_loadMips)
                     ApplyMipmaps(mips);
             }
+            UpdateShadowResolution();
             if (s_scaleFixed)
                 return;
             int32_t setting = settings::GetInt(settings::Id::InternalResolution);
@@ -8551,6 +9116,7 @@ void main()
             s_resolutionSetting = setting;
             s_autoSeen = 0;
             ApplyRenderScale(want, ScaleReason(setting, regionW, regionH) + (splitCapped ? ", split screen: at most Auto's" : ""));
+            UpdateShadowResolution();  // Auto follows the new scale
         }
 
         // ---------------------------------------------------------------
@@ -8863,6 +9429,8 @@ void main()
             for (uint32_t i = 0; i < dwords; i++)
                 ucode[i] = __builtin_bswap32(words[i]);
             slot->info = TranslateShader(slot->stage, ucode.data(), dwords);
+            if (slot->stage == ShaderStage::Pixel && slot->info.ok && slot->info.texture2DMask)
+                slot->ucode = std::move(ucode);  // (Sharper UI's variant: gpu/sharp_ui.h)
             if (!slot->info.ok)
                 fprintf(stderr, "[renderer] %s_%016llx: translation failed: %s\n", type == 0 ? "vs" : "ps",
                     (unsigned long long)h, slot->info.error.c_str());
@@ -9432,7 +10000,7 @@ void main()
             return;
 
         // Pipeline state.
-        const TextureLayout& layout = GetTextureLayout(*s_vs, *s_ps);
+        const TextureLayout* layoutChoice = &GetTextureLayout(*s_vs, *s_ps);
         PipelineKey key{};
         key.vs = s_vs->hash;
         key.ps = s_ps->hash;
@@ -9469,12 +10037,86 @@ void main()
         key.raster = cull | (modeCntl.face ? 4u : 0u) | (clipCntl.clip_disable ? 8u : 0u) | (depthBias ? 16u : 0u) |
             (alphaTest ? 32u : 0u);
 
+        // Settings > Graphics > Sharper UI (gpu/sharp_ui.h): a front-end
+        // draw into a scaled target, with 2D textures and a blend whose
+        // colour premultiplied (or straight) filtering keeps, takes its
+        // pixel shader's sharpTex2D variant. Off, at 1x, and every other
+        // draw: key.pad 0, the plain pipeline as before.
+        const bool sharpCandidate = s_drawScaled && color[0] && s_ps->info.texture2DMask &&
+            gpu::RunsGuestPixelShader(edramMode, s_depthOnlyGuestPs);
+        const bool frontEnd = sharpCandidate && IsFrontEndDraw();
+        const gpu::sharp_ui::Mode sharpMode = frontEnd ? gpu::sharp_ui::ModeForBlend(key.blend[0]) : gpu::sharp_ui::Mode::Off;
+        if (sharpMode != gpu::sharp_ui::Mode::Off && SharpUiOn())
+        {
+            key.pad = uint32_t(sharpMode);
+            // UI-C: the draw's coverage into the UI mask (not over only small
+            // textures: the dims' and fades' white fill).
+            if (UiMaskWanted() && s_uiMask.accum.view)
+            {
+                bool small = true;
+                for (uint32_t n = 0; n < 32; n++)
+                    if ((s_ps->info.texture2DMask >> n) & 1)
+                    {
+                        const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                        if (((d2 & 0x1FFF) + 1) * (((d2 >> 13) & 0x1FFF) + 1) > 32 * 32)
+                            small = false;
+                    }
+                key.pad |= gpu::sharp_ui::UiMaskKind(key.blend[0], small) << 2;
+            }
+        }
+        // The movie's quad, likewise (Movie Upscaling).
+        // (Straight whatever its blend: its planes are Y, U and V, whose alpha
+        // weights no colour; and the Y plane only, fetch slot 0, 1280x720:
+        // the 640x360 chroma planes carry little of what looks sharp, and
+        // all three cost ~4 ms at 4K on an M1 Pro.)
+        const gpu::sharp_ui::Mode movieMode = sharpCandidate && !frontEnd && IsMovieDraw()
+            ? gpu::sharp_ui::Mode::Luma : gpu::sharp_ui::Mode::Off;
+        if (movieMode != gpu::sharp_ui::Mode::Off && SharpMovieOn())
+            key.pad = uint32_t(movieMode);
+        static const bool logMovieDraws = std::getenv("NFSMW_SHARP_UI_RECTS") != nullptr;
+        if (movieMode != gpu::sharp_ui::Mode::Off && logMovieDraws)
+        {
+            static uint32_t movieLines = 0;
+            static std::unordered_set<uint64_t> seen;
+            if (movieLines < 64 && seen.insert(s_vs->hash ^ (s_ps->hash << 1) ^ key.blend[0]).second)
+            {
+                movieLines++;
+                std::string tex;
+                for (uint32_t n = 0; n < 32; n++)
+                    if ((s_ps->info.texture2DMask >> n) & 1)
+                    {
+                        const uint32_t d2 = s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 2];
+                        tex += std::format(" t{} {}x{}", n, (d2 & 0x1FFF) + 1, ((d2 >> 13) & 0x1FFF) + 1);
+                    }
+                fprintf(stderr, "[sharp-movie] vs_%016llx ps_%016llx VTE %03X blend %08X target %ux%u:%s\n", (unsigned long long)s_vs->hash,
+                    (unsigned long long)s_ps->hash, Reg<reg::PA_CL_VTE_CNTL>().value & 0xFFF, key.blend[0], color[0]->guestWidth,
+                    color[0]->guestHeight, tex.c_str());
+            }
+        }
+
+        if ((key.pad >> 2) & 3)
+            layoutChoice = &GetUiMaskTextureLayout(*s_vs, *s_ps);
         bool pipelinePending;
-        VkPipeline pipeline = GetPipeline(key, layout.pipeline, pipelinePending);
+        VkPipeline pipeline = GetPipeline(key, layoutChoice->pipeline, pipelinePending);
+        if (pipelinePending && key.pad)
+        {
+            // The variant still compiling (just turned on): the plain one meanwhile.
+            key.pad = 0;
+            layoutChoice = &GetTextureLayout(*s_vs, *s_ps);
+            pipeline = GetPipeline(key, layoutChoice->pipeline, pipelinePending);
+        }
         if (pipelinePending)
             return;  // still compiling (counted in OnSwap's log)
         if (pipeline == VK_NULL_HANDLE)
             return skip(5, "pipeline creation failed");
+        const TextureLayout& layout = *layoutChoice;
+        // UI-C: the accumulator this draw's variant writes (binding 127).
+        VkDescriptorImageInfo uiMaskInfo{ VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL };
+        if ((key.pad >> 2) & 3)
+        {
+            uiMaskInfo.imageView = s_uiMask.accum.view;
+            s_uiMask.written = true;
+        }
 
         // Textures (may upload through the ring and so flush: before the
         // constants are allocated).
@@ -10056,6 +10698,83 @@ void main()
                 };
                 plan = gpu::bars::PlanVignette(draw, read, texel);
             }
+            // Vert+: menu art authored a little past the 16:9 frame's top or
+            // bottom (the Options screens' graffiti header) whose own edge
+            // showed as a cut with the scene above it: carried to the
+            // screen's edge by a copy stretched from a pivot inside it
+            // (GitHub #87, gpu/edge_bars.h).
+            // NFSMW_EDGE_PIECES=0 turns it off (an A/B switch).
+            static const bool edgePieces = [] { const char* v = std::getenv("NFSMW_EDGE_PIECES"); return !(v && v[0] == '0'); }();
+            // Vert+: the Options hub's graffiti tags, revealed in place below
+            // the 16:9 frame's top: moved up so their art's top is the
+            // screen's (GitHub #87, gpu/edge_bars.h's raise). Same switch.
+            // Asked before the edge piece: mid-reveal a tag's quad crosses
+            // the band edge like one.
+            if (plan.fill == gpu::bars::Fill::None && edgePieces)
+            {
+                // Only a picture seen mid-reveal, and from then on while it
+                // is drawn (the same texture, drawn within the last 4 s; the
+                // two tags share theirs): a still picture of the same shape
+                // stays.
+                struct Revealed { uint64_t key, frame; };
+                static Revealed revealed[16]{};
+                static uint32_t nextRevealed = 0;
+                const uint64_t key = (uint64_t((uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu) << 32) | (uint64_t(draw.t0Width) << 16) | draw.t0Height;
+                auto admit = [&](bool revealing) {
+                    Revealed* r = nullptr;
+                    for (Revealed& e : revealed)
+                        if (e.frame && e.key == key && s_frame - e.frame <= 240)
+                            r = &e;
+                    if (!r && revealing)
+                        r = &revealed[nextRevealed++ % 16], r->key = key;
+                    if (!r)
+                        return false;
+                    r->frame = s_frame;
+                    return true;
+                };
+                // The art's visible top: its picture's first ink row
+                // (alpha), once per picture.
+                struct Ink { uint64_t key; int row; };
+                static Ink inks[16]{};
+                static uint32_t nextInk = 0;
+                int inkRow = -2;
+                for (const Ink& e : inks)
+                    if (e.key == key && e.row != -2)
+                        inkRow = e.row;
+                if (inkRow == -2 && gpu::bars::RaiseCandidate(draw))
+                {
+                    const uint32_t rt0Base = (uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu;
+                    const uint32_t rt0Pitch = uint32_t(t0.pitch) << 5;
+                    auto rtexel = [&](uint32_t x, uint32_t y, uint32_t& word) {
+                        if (!rt0Pitch || x >= draw.t0Width || y >= draw.t0Height || x >= rt0Pitch)
+                            return false;
+                        word = GpuSwap(LoadPhysical(rt0Base + gpu::bars::TexelOffset32(x, y, rt0Pitch, t0.tiled != 0)), uint32_t(t0.endianness));
+                        return true;
+                    };
+                    inkRow = gpu::bars::FirstInkRow(rtexel, draw.t0Width, draw.t0Height);
+                    inks[nextInk++ % 16] = { key, inkRow };
+                    // Each byte's largest value over the picture's first rows,
+                    // to check the alpha byte: once per picture, in every log.
+                    std::string bytes;
+                    for (uint32_t y = 0; y < std::min(8u, draw.t0Height); y++)
+                    {
+                        uint32_t mx[4] = {};
+                        for (uint32_t x = 0; x < draw.t0Width; x++)
+                        {
+                            uint32_t w = 0;
+                            if (rtexel(x, y, w))
+                                for (int b = 0; b < 4; b++)
+                                    mx[b] = std::max(mx[b], (w >> (24 - 8 * b)) & 0xFFu);
+                        }
+                        bytes += std::format(" {:02X}{:02X}{:02X}{:02X}", mx[0], mx[1], mx[2], mx[3]);
+                    }
+                    fprintf(stderr, "[renderer] raise: t0 %08X %ux%u: first ink row %d (each row's largest byte, top byte first:%s)\n", rt0Base,
+                        draw.t0Width, draw.t0Height, inkRow, bytes.c_str());
+                }
+                plan = gpu::bars::PlanRaise(draw, read, admit, gpu::bars::FirstInkV(inkRow, draw.t0Height));
+            }
+            if (plan.fill == gpu::bars::Fill::None && edgePieces)
+                plan = gpu::bars::PlanEdgePiece(draw, read);
             // A flat full-screen layer short of the screen's edges (the fade
             // to black before a load): stretched to them (gpu/edge_bars.h).
             if (plan.fill == gpu::bars::Fill::None)
@@ -10073,10 +10792,12 @@ void main()
             const bool backdrop = barPlan.fill == gpu::bars::Fill::Backdrop;
             const bool vignette = barPlan.fill == gpu::bars::Fill::Vignette;
             const bool layer = barPlan.fill == gpu::bars::Fill::Layer;
+            const bool piece = barPlan.fill == gpu::bars::Fill::EdgePiece;
+            const bool raise = barPlan.fill == gpu::bars::Fill::Raise;
             const gpu::bars::Box& box = barPlan.box;
             const uint64_t key = (0x36ull << 56) | (uint64_t(kind) << 40) | (uint64_t(barPlan.rectCount) << 36) |
                 (uint64_t(std::lround(aspectX * 4096.0f)) << 18) | uint64_t(std::lround(aspectY * 4096.0f));
-            static uint64_t loggedKey[7] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
+            static uint64_t loggedKey[9] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
             if (loggedKey[kind] != key)
             {
                 loggedKey[kind] = key;
@@ -10084,15 +10805,19 @@ void main()
                 if (barPlan.rectCount)
                     snprintf(fills, sizeof(fills), "fills %u rectangle(s) %s, first [%d,%d)x[%d,%d) (host px)", barPlan.rectCount,
                         backdrop ? "outside it (past the 16:9 band, and the band's overscan rows)"
+                            : piece ? "from its pivot to the screen's edge, its art there stretched"
                             : blackout ? "outside it (past the 16:9 band, and the band's border round it)" : "past the 16:9 band", barPlan.rects[0].x0,
                         barPlan.rects[0].x1, barPlan.rects[0].y0, barPlan.rects[0].y1);
                 else
-                    snprintf(fills, sizeof(fills), "%s", vignette || layer ? "stretched to the screen's edges"
+                    snprintf(fills, sizeof(fills), "%s", raise ? "moved so its art's top is the screen's edge"
+                        : vignette || layer ? "stretched to the screen's edges"
                         : blackout || backdrop ? "fills nothing" : "reaches the screen edge: nothing to fill");
                 LogOnce(key,
                     "edge bars: frame %llu vs_%016llx ps_%016llx: %s (clip x %.3f..%.3f y %.3f..%.3f, colour %08X; view scale x %.4f y %.4f) %s",
                     (unsigned long long)s_frame, (unsigned long long)s_vs->hash, (unsigned long long)s_ps->hash,
-                    vignette ? "the Showcase's vignette (clear in the middle)" : layer ? "a full-screen layer short of the screen's edges (a fade)"
+                    raise ? "menu art revealed below the 16:9 band's edge (a raise)"
+                        : piece ? "menu art past the 16:9 band's edge (an edge piece)"
+                        : vignette ? "the Showcase's vignette (clear in the middle)" : layer ? "a full-screen layer short of the screen's edges (a fade)"
                         : backdrop ? "a full-band backdrop (black outside it)"
                         : blackout ? "a black frame" : kind == uint32_t(gpu::bars::Fill::RightBar) ? "the right vid-cam bar" : "the left vid-cam bar",
                     box.x0, box.x1, box.y0, box.y1, barPlan.argb, aspectX, aspectY, fills);
@@ -10100,14 +10825,14 @@ void main()
             // NFSMW_LOG_FRONTEND=1: the first frame of each run of frames
             // with a match, bars and black frames apart (one run per vid-cam
             // scene and per cut; any other is a draw this should not take).
-            static uint64_t lastBarFrame[5] = { ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1 };
-            uint64_t& last = lastBarFrame[layer ? 4 : vignette ? 3 : backdrop ? 2 : blackout ? 1 : 0];
+            static uint64_t lastBarFrame[7] = { ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1, ~0ull - 1 };
+            uint64_t& last = lastBarFrame[raise ? 6 : piece ? 5 : layer ? 4 : vignette ? 3 : backdrop ? 2 : blackout ? 1 : 0];
             if (logFrontEnd && s_frame != last && s_frame != last + 1)
             {
                 xenos::xe_gpu_texture_fetch_t t0;
                 memcpy(&t0, &s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], sizeof(t0));
                 fprintf(stderr, "[frontend] edge bars: matching from frame %llu: %s x %.3f..%.3f y %.3f..%.3f colour %08X blend %08X t0 %08X %ux%u, %u rect(s)\n",
-                    (unsigned long long)s_frame, layer ? "layer" : vignette ? "vignette" : backdrop ? "backdrop" : blackout ? "black frame"
+                    (unsigned long long)s_frame, raise ? "raise" : piece ? "edge piece" : layer ? "layer" : vignette ? "vignette" : backdrop ? "backdrop" : blackout ? "black frame"
                         : kind == uint32_t(gpu::bars::Fill::RightBar) ? "right bar" : "left bar",
                     box.x0, box.x1, box.y0, box.y1, barPlan.argb, s_regs[XE_GPU_REG_RB_BLENDCONTROL0] & 0x1FFF1FFF,
                     (uint32_t(t0.base_address) << 12) & 0x1FFFFFFFu, uint32_t(t0.size_2d.width) + 1, uint32_t(t0.size_2d.height) + 1,
@@ -10362,8 +11087,13 @@ void main()
                     if (const float reachAllY = std::min(-allLoY, allHiY); cover && reachAllY < 1.0f)
                     {
                         // posScale.x and .y alone: about the viewport's centre
-                        // (clip 0,0), as above.
-                        kCover = std::min(1.0f / sv, 1.01f / reachAllY);
+                        // (clip 0,0), as above. Up to kFillEdge / sv, not 1 /
+                        // sv: a layer authored a hair short of the 16:9
+                        // frame's edge (the dialogs' dim, y -0.999..0.995 of
+                        // the band) scaled by 1 / sv alone stopped as short of
+                        // the screen's, and its top rows showed the menu
+                        // undimmed (GitHub #87).
+                        kCover = std::min(gpu::bars::kFillEdge / sv, 1.01f / reachAllY);
                         pc.posScale[0] *= kCover;
                         pc.posScale[1] *= kCover;
                     }
@@ -10432,6 +11162,16 @@ void main()
                             memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
                         if (barPlan.fill == gpu::bars::Fill::Vignette)
                             memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
+                        if (barPlan.fill == gpu::bars::Fill::Raise)
+                            memcpy(pc.posScale, barPlan.posScale, sizeof(pc.posScale));
+                        // An edge piece: the draw itself stops at the band's
+                        // edge; its copy (below, after it) fills the rows past.
+                        if (barPlan.fill == gpu::bars::Fill::EdgePiece && barPlan.clipOwn)
+                        {
+                            const gpu::bars::Rect& r = barPlan.own;
+                            scissor.offset = { r.x0, r.y0 };
+                            scissor.extent = { uint32_t(std::max(r.x1 - r.x0, 0)), uint32_t(std::max(r.y1 - r.y0, 0)) };
+                        }
                     }
                     // The edge candidates (above) that still stop short of
                     // the screen's edge after the rules, each distinct line
@@ -10482,7 +11222,9 @@ void main()
                         uint32_t& perT0Edge = perKey[(uint64_t(t0) << 32) | (kind << 3) | edgeCode];
                         if (perT0Edge >= 4)
                             continue;
-                        const std::string action = barPlan.fill == gpu::bars::Fill::Vignette ? std::string("vignette stretched to the screen's edges")
+                        const std::string action = barPlan.fill == gpu::bars::Fill::Raise ? std::string("raised: art top on the screen's edge")
+                            : barPlan.fill == gpu::bars::Fill::EdgePiece ? std::string("edge piece stretched to the screen's edge")
+                            : barPlan.fill == gpu::bars::Fill::Vignette ? std::string("vignette stretched to the screen's edges")
                             : barPlan.fill == gpu::bars::Fill::Layer ? std::string("layer stretched to the screen's edges")
                             : barPlan.rectCount
                             ? std::string(barPlan.fill == gpu::bars::Fill::Backdrop ? "backdrop fill"
@@ -10620,6 +11362,8 @@ void main()
         if (game::covers::Enabled())
             LogCovers(count, uint32_t(initiator.prim_type), src, pc.posScale, scissor, w * float(scaleX), h * float(scaleY), float(scaleX),
                 float(scaleY), barPlan);
+        if (sharpMode != gpu::sharp_ui::Mode::Off)
+            NoteSharpRect(count, src, pc.posScale, scissor, w * float(scaleX), h * float(scaleY));
         // NFSMW_LOG_DRAWS=<seconds>: every draw of one frame (target, viewport,
         // scissor, textures, shaders), consecutive duplicates folded.
         if (s_logDrawsNow)
@@ -10631,7 +11375,8 @@ void main()
                     line += std::format(" {}:{:08X}", n, (s_regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + n * 6 + 1] & 0x1FFFF000u));
             if (barPlan.rectCount)
                 line += std::format(" +edge {} fill x{}", barPlan.fill == gpu::bars::Fill::Backdrop ? "backdrop"
-                    : barPlan.fill == gpu::bars::Fill::Blackout ? "black frame" : "bar", barPlan.rectCount);
+                    : barPlan.fill == gpu::bars::Fill::Blackout ? "black frame" : barPlan.fill == gpu::bars::Fill::EdgePiece ? "edge piece" : "bar",
+                    barPlan.rectCount);
             else if (barPlan.fill == gpu::bars::Fill::Vignette)
                 line += " +vignette stretched";
             else if (barPlan.fill == gpu::bars::Fill::Layer)
@@ -10710,7 +11455,7 @@ void main()
             uint32_t setOffset = ~0u;
             VkPipelineLayout textureLayout = VK_NULL_HANDLE;
             uint32_t textureCount = ~0u;
-            VkDescriptorImageInfo textures[96];
+            VkDescriptorImageInfo textures[97];
             DrawConstants pc{};
         };
         static BoundState bound;
@@ -10780,6 +11525,10 @@ void main()
             memcpy(bound.bias, bias, sizeof(bias));
         }
 
+        // Relative constant reads find the constants in g_ring, which every
+        // set binds from the ring's start: the whole ring offset (constRel).
+        if (s_vs->info.constRelative || s_ps->info.constRelative)
+            pc.constRing = uint32_t(constantsOffset);
 #ifdef _WIN32
         // The constants' slot's set and their offset in it (see s_slotSet0).
         // `bound` keeps the whole ring offset, which names both, so a skip
@@ -10800,7 +11549,7 @@ void main()
         }
 #endif
 
-        VkWriteDescriptorSet writes[96];
+        VkWriteDescriptorSet writes[97];
         uint32_t writeCount = 0;
         for (uint32_t d = 0; d < 3; d++)
             for (uint32_t n = 0; n < 32; n++)
@@ -10814,6 +11563,15 @@ void main()
                 wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 wds.pImageInfo = &textureInfos[d * 32 + n];
             }
+        if (uiMaskInfo.imageView)
+        {
+            VkWriteDescriptorSet& wds = writes[writeCount++];
+            wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            wds.dstBinding = 127;
+            wds.descriptorCount = 1;
+            wds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            wds.pImageInfo = &uiMaskInfo;
+        }
         if (writeCount)
         {
             bool same = !fresh && bound.textureLayout == layout.pipeline && bound.textureCount == writeCount;
@@ -11237,11 +11995,51 @@ void main()
         vkCmdDispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
         GuardGpu(pc.base, frontBytes, false, "front buffer");
         FullBarrier();
+        // UI-C: this frame's UI weights for the presenter, the accumulator
+        // cleared for the next (a real picture's only; in-between pictures
+        // keep none).
+        VkImageView uiMaskView = VK_NULL_HANDLE;
+        if (scaled && !b && settings::GetBool(settings::Id::SharpUi) && UiMaskWanted())
+        {
+            EnsureUiMaskImages(outW, outH);
+            if (s_uiMask.written)
+            {
+                if (!s_uiMask.pipeline)
+                {
+                    VkDescriptorSetLayoutBinding mb[2] = {
+                        { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                        { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                    };
+                    CreateComputePipeline(kUiMaskGlsl, mb, 2, 2 * sizeof(int32_t), s_uiMask.setLayout, s_uiMask.layout, s_uiMask.pipeline);
+                }
+                Image& out = s_uiMask.out[s_uiMask.next];
+                s_uiMask.next ^= 1;
+                VkDescriptorImageInfo src{ VK_NULL_HANDLE, s_uiMask.accum.view, VK_IMAGE_LAYOUT_GENERAL };
+                VkDescriptorImageInfo dst{ VK_NULL_HANDLE, out.view, VK_IMAGE_LAYOUT_GENERAL };
+                VkWriteDescriptorSet mw[2] = {
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &src, nullptr, nullptr },
+                    { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &dst, nullptr, nullptr },
+                };
+                const int32_t size[2] = { int32_t(outW), int32_t(outH) };
+                vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_uiMask.pipeline);
+                s_pushDescriptorSet(s_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_uiMask.layout, 0, 2, mw);
+                vkCmdPushConstants(s_cmd, s_uiMask.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(size), size);
+                vkCmdDispatch(s_cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
+                FullBarrier();
+                VkClearColorValue zero{};
+                VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                vkCmdClearColorImage(s_cmd, s_uiMask.accum.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+                FullBarrier();
+                s_uiMask.written = false;
+                uiMaskView = out.view;
+            }
+        }
 #ifdef _WIN32
         if (s_black.on)
             RecordBlackProbe(front, outW, outH);
 #endif
         SubmitRecorded(7);  // the presenter's blit comes later in queue order
+        video::SubmitUiMask(uiMaskView);  // (null: none for this picture)
         video::SubmitFrontImage(front.image, outW, outH, width, height, between, shift, target);
         // Back at 1x (a live change): the host-resolution image is no longer
         // needed. The presenter has this frame to show instead.

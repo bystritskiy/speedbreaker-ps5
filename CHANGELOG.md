@@ -4,6 +4,189 @@ What changed in each SpeedBreaker release, newest first. Each release's notes on
 its entry here, and the game shows the entry once, the first time a new version starts (offline:
 it's built into the game).
 
+## v0.2.4
+
+### What's new
+
+- **Shadow Resolution Auto** (Settings > Graphics), the new default: 2x when Internal Resolution
+  renders at 2x or more, otherwise 1x. Car and road shadows are sharper on 1440p and 4K screens,
+  and on a 1080p screen where Internal Resolution's Auto renders at 2x (a dedicated GPU, or a Mac).
+  Where Internal Resolution stays at 1x, so do the shadows: Intel integrated graphics on Windows,
+  iPhone and iPad. Steam Deck and Steam Frame keep 1x shadows at any resolution, docked too, where
+  2x would cost too much speed. After the update, a Shadow Resolution of 1x from an earlier version
+  becomes Auto, once; 1.5x and 2x are kept, and so is a 1x you choose from now on (GitHub
+  issue #90, reported by deus-ex-machine).
+- **Player 1 follows the controller you last pressed**: with more than one controller connected,
+  pressing a button, a trigger or a stick on any of them makes it player 1, with no setting
+  needed. A docked Steam Deck in Desktop Mode now answers the pad in your hands instead of its
+  own controls, and a pad connected after the game starts works at once. Drift and a resting
+  trigger never count. The settings menu follows player 1 too. In split screen, player 1 keeps
+  the controller used before split screen began, and player 2 joins as before (GitHub issue #66,
+  suggested by krittinen).
+- **Updates at startup**: once at each launch, SpeedBreaker asks GitHub whether a newer version is
+  out. If so, a short notice says so, and Settings offers "Update to v0.x.y", which shows what's
+  new and the download page (in your browser, or as a QR code to read with a phone). Only the
+  question goes out, with the version you run: nothing about you or this device. Turn it off with
+  Settings > Advanced > Check for Updates at Startup; Check for Updates still works by hand.
+- **Intel Macs** (build from source, community-tested): SpeedBreaker now builds and runs on an
+  Intel Mac with macOS 15 or later and a CPU with AVX2, using MoltenVK 1.4.2. There's no Intel
+  Mac download; the README's "Building from source" has the steps. A player runs it with an AMD
+  Radeon RX 6600 XT; we have no Intel Mac to test on, and Intel graphics haven't been tried.
+  Thanks to vorno-crole (pull request #58).
+- **Cops in Quick Race** (Quick Race > Custom Race, in the race options): a new Cops row, Off by
+  default, puts the police in Circuit, Sprint, Lap Knockout and Speedtrap races. It's offered in
+  single player only (not in Drag races or split screen). Thanks to HungryManticore (pull
+  request #82).
+- **The German (PAL) disc, in builds from source.** A build with its code (README, Building from
+  source, step 2) plays it like the Spanish one: its own code, German movies and police radio, and
+  German as the Language row's default. It installs beside a USA or Spanish install, with its saves
+  in their own folder (save-pal-de/). The downloads don't include it yet: their installer refuses
+  the German disc up front, saying it needs a build with its code. Thanks to JokerGermany (pull
+  request #88).
+
+### More about it
+
+- NFSMW_QUICK_RACE_COPS=0 removes the Cops row.
+- For builders: ppc-pal-de/ from config/pal-de/ (-DSB_PAL_DE=OFF leaves it out).
+  survey/func_map.py and survey/region_map.py --region pal-de made its tables, and do the same for
+  another region (docs/REGION_PAL_DE.md).
+
+## v0.2.3
+
+### What's new
+
+- **Sharper UI** (Settings > Graphics, on by default): above 1x Internal Resolution, the menus'
+  and the HUD's text, icons and panels are enlarged with a sharper filter instead of a blur, so
+  they look crisper on 1440p and 4K screens. Where the finished picture is then enlarged to the
+  screen by an uneven factor (for example 1440p to 4K), the UI's pixels also take FSR 1's
+  edge-aware upscale instead of the bicubic one and skip the anti-aliasing pass, which had
+  softened and dimmed them, at every screen shape (16:10 and ultrawide included). The art,
+  layout and colors are the game's own; only the enlarging changes. Off is exactly as before
+  (GitHub issue #85, suggested by The-RiVaL).
+- **Movie Upscaling** (Settings > Graphics, Sharper by default): the game's 720p movies (the
+  intro and the cutscenes) are enlarged with a sharper, edge-aware filter: FSR 1's upscale where
+  the movie reaches the screen at 1x, the same filter as Sharper UI above 1x, and a Lanczos
+  filter on iPhone and iPad at 1x. Colors and brightness are unchanged. Original keeps the
+  movies as before.
+- Anisotropic Filtering's Auto is 16x on a Mac rendering at 1x Internal Resolution (was 4x on
+  Macs with integrated graphics): roads and lane markings ahead stay sharper, at no measurable
+  cost. Above 1x, and on other devices, Auto is unchanged.
+- Mac: the game uses a little less CPU in races and in the menus, with the same frame rate: the
+  part that stands in for the Xbox 360's graphics command processor goes to sleep sooner while it
+  has no work.
+
+### Fixed
+
+- Menu edges on screens taller than 16:9 (a 16:10 MacBook, the Steam Deck, an iPad) with Aspect
+  Ratio on Fill Screen (GitHub issue #87, reported by DoubleDips): the black graffiti header of the
+  Options screens no longer ends in a straight cut with the 3D scene showing above it (the game
+  draws it a little past the top of a 16:9 picture; on a taller screen its top part is now drawn a
+  little taller so it reaches the screen's edge), and the graffiti tags that drip into view on the
+  Options menu now start at the top of the screen instead of a little below it. 16:9 pictures are
+  unchanged. The dim behind a dialog ("Loading a new alias", "No aliases were found") now reaches
+  the top row of the screen.
+- The Rap Sheet's black page now fills the whole screen at every screen shape, 16:9 included,
+  instead of leaving a thin frame of the scene behind it (as the Blacklist bios already do since
+  v0.1.6). The dialog dim's top rows are dimmed at 16:9 too.
+
+### More about it
+
+- NFSMW_SHARP_UI=0/1 and NFSMW_MOVIE_UPSCALE=original/sharper override the two settings.
+  NFSMW_UI_MASK=0 keeps Sharper UI but turns off the UI's FSR 1 pass at the screen (it never
+  runs with HDR Output on, at 1x, or when the picture is enlarged by a whole number).
+- Mac: NFSMW_CP_IDLE_SPIN_US sets how long the command processor waits for new work before it
+  sleeps, in microseconds: 500 on a Mac now; 2000, as before, on iPhone, iPad, Linux, SteamOS
+  and Windows.
+- NFSMW_EDGE_PIECES=0 turns off the taller-screen fixes for the Options screens' graffiti header
+  and tags above, for comparing with the earlier picture.
+
+## v0.2.2
+
+### Fixed
+
+- Distant grass on the roadside verges still turned black on AMD Radeon RX 6000 cards under
+  Windows (#67, #54): v0.2.1's fix was aimed at the wrong thing. AMD's Windows driver picked the
+  close-up row of lighting values in the shader that draws the far part of the verge, so the far
+  band came out at about a fifth of its brightness. On AMD's own driver, pixel shaders now keep the
+  Xbox 360's registers as separate variables, which it compiles correctly; other GPUs and drivers
+  run the same shaders as before. Reported by siddharthkuradia and agustinlopez9; thanks to
+  siddharthkuradia and ZeroDarlingxx for the RenderDoc captures and for testing the fix.
+- The sun's shadows now reach the left and right edges of the picture at every screen shape,
+  16:9 included. The game fits its shadow map to a narrower view than the one it draws, so the
+  picture's sides came out unshadowed: on an ultrawide screen (Aspect Ratio on Fill Screen) by a
+  wide margin, and at 16:9 near the camera, where the original game on the Xbox 360 also left
+  these gaps. The shadow map now covers the whole view, so its shadows are a little softer than on
+  the 360; Shadow Resolution 1.5x or 2x sharpens them again (GitHub issue #81, reported by
+  Nelson340; krittinen spotted it at 16:9 too).
+- With HDR Output on, the game seen through the settings overlay looks as it does in SDR: it no
+  longer brightens under the panel when HDR comes on, and bright highlights, such as the shine on
+  a car's hood in the menus, no longer show through the window.
+- Windows (beta): the sun's shadows cost the graphics chip less each frame, with the same picture,
+  as in Windows beta 4 (the Mac, iPhone and iPad have done this since v0.2.0).
+
+### More about it
+
+- Shadows: NFSMW_SHADOW_FIT=view (the default) fits the shadow map to the view's own projection;
+  =aspect widens the game's fit with the screen only (a no-op at 16:9), and =game keeps the
+  original fit, for comparison.
+- AMD: the log's "[renderer] shader registers:" line says which shaders use separate variables
+  ("variables in pixel shaders" on AMD's own driver, "array" elsewhere). NFSMW_SCALAR_REGS=0 turns
+  it off, 1 uses them in vertex shaders only, 2 in pixel shaders only (the default there), 3 in
+  both. Testers found that only the pixel shaders matter: 2 and 3 fixed the grass, 0 and 1 didn't.
+- Windows: the log's "[renderer] deferred shadow resolves" line says the shadow map is sampled in
+  place; NFSMW_SHADOW_DEFER=0 turns it off. Linux and SteamOS are unchanged.
+
+## v0.2.1
+
+### What's new
+
+- **HDR output** (Settings > Display > HDR Output, off by default) on a Mac with an HDR display,
+  on SteamOS and the Steam Deck OLED with HDR on, and on Linux and Windows PCs whose system is in
+  HDR: the game's highlights — the sun, headlights, lit signs — reach the display's extended
+  range. This settings overlay stays at standard brightness; the game's own front end and HUD are
+  part of the picture, so their whites follow the highlights too. HDR Strength sets how far
+  highlights go above white: 2x by default, up to 4x. HDR Paper White sets how bright ordinary
+  white is in HDR10; Auto matches the system (400 nits on SteamOS and the Steam Deck, 200 on
+  Windows and Linux, 100 on a Mac). A mostly white frame is dimmed toward SDR, so a boot flash or a
+  full-screen logo doesn't become a 4x flash. On a Mac, HDR Format chooses Auto, Extended Linear,
+  or HDR10 (PQ). Implemented by @danielgpinheiro, from @DoubleDips's idea (GitHub issue #25).
+- **Shadow Resolution** (Settings > Graphics): draws the sun's shadows at 1.5x or 2x for sharper
+  edges, at some GPU time and memory. 1x, the default, is as on the Xbox 360. Thanks to krittinen
+  (pull request #52).
+- **Cooler Colors** (Settings > Display, off by default): a cooler picture with less of the
+  game's yellow, over the whole game picture. Off keeps the game's own colors, as on the Xbox 360.
+  Thanks to Namiidev (pull request #50).
+
+### Fixed
+
+- Distant grass on the roadside verges turned black on AMD Radeon RX 6000 cards under Windows
+  (#67, #54). Shaders that look up their lighting per pixel now read it the way every driver
+  handles; other GPUs show the same picture as before (NFSMW_CONST_REL_RING=0: the old read).
+- Anisotropic Filtering at 8x or 16x drew a light outline round dirt-road decals in shadow (#70):
+  the sun's shadow map keeps the game's own filtering, whatever the setting.
+- iPhone and iPad builds from source: scripts/ios/build.sh no longer stops silently after the
+  compile when the optional PAL (Spanish) code isn't built. Thanks to logicsandbox (pull request
+  #72).
+
+### More about it
+
+- HDR Output uses either a 16-bit-float swapchain in extended linear sRGB (macOS EDR) or a 10-bit
+  swapchain in HDR10/PQ with static metadata (everywhere else, and on a Mac by choice); the log
+  says "swapchain: HDR" or "swapchain: HDR10" with the choice. Outside macOS it's offered where the
+  surface lists an HDR10 format, which a system in HDR (or gamescope with its HDR output on) does;
+  otherwise the picture stays standard range. The game renders into its usual 8-bit SDR surfaces
+  first, and the composite expands by Rec.709 luma rather than each channel, so bright colours
+  keep their hue. White is 1.0 in EDR and HDR Paper White's nits in HDR10; HDR Strength picks the
+  peak above it, and a frame-average limiter, measured on the GPU in the same frame, lowers the
+  peak toward white when the scene is mostly white, keeping MaxFALL at paper white. A local limit
+  does the same for large bright areas (tyre smoke, the sun's halo): each part of the screen adds
+  at most a tenth of white above SDR, so smoke no longer glows as a flat blob while small lights
+  keep the full peak (NFSMW_HDR_LOCAL_BUDGET=0 turns it off). EDR's current headroom follows the
+  display every frame, and the log notes when it changes. Bug-report screenshots and NFSMW_CHECK_PRESENT_SEC
+  captures stay standard-range; the PPM decodes PQ from BT.2020 back to Rec.709. NFSMW_HDR=1,
+  NFSMW_HDR_FORMAT=auto|edr|hdr10, NFSMW_HDR_STRENGTH=2x|3x|4x and
+  NFSMW_HDR_PAPER_WHITE=auto|100|200|300|400 set them for a run; iOS and Android don't offer them.
+
 ## v0.2.0
 
 ### What's new

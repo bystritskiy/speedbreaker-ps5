@@ -57,13 +57,37 @@ namespace gpu
         uint64_t constUsed[4] = {};
         bool constRelative = false;
         bool constPacked = false;
+        uint32_t sharpFetches = 0;       // PS, TranslateOptions::sharpFetch2D: 2D fetches through sharpTex2D
+    };
+
+    struct TranslateOptions
+    {
+        // Settings > Graphics > Sharper UI's variant of a pixel shader
+        // (gpu/sharp_ui.h): its 2D fetches through sharpTex2D. Off (the
+        // default): the GLSL is exactly the plain translation's.
+        bool sharpFetch2D = false;
     };
 
     // NFSMW_CP_OPT bit 8 (on by default): translate shaders with packed constants.
     bool PackedConstantsEnabled();
 
+    // NFSMW_CONST_REL_RING (on by default): relative constant reads (constRel)
+    // come from the ring's storage buffer rather than the uniform buffer.
+    bool RelativeConstantsFromRing();
+
+    // Registers as separate variables (r0, r1, ...) instead of the array r[]
+    // in shaders without relative register addressing: bit 0 vertex, bit 1
+    // pixel shaders. AMD's Windows driver (RX 6000) picks the wrong lighting
+    // row in Most Wanted's far verge shader with the array (issue #67). The
+    // renderer sets the default from the driver (pixel shaders, 2, on AMD's
+    // proprietary driver: the half the fix needs; off elsewhere);
+    // NFSMW_SCALAR_REGS=0..3 overrides it.
+    void SetScalarRegistersDefault(uint32_t stageMask);
+    uint32_t ScalarRegisters();
+
     // `ucode` is in host byte order (swap the guest's big-endian words first).
     TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount);
+    TranslatedShader TranslateShader(ShaderStage stage, const uint32_t* ucode, size_t dwordCount, const TranslateOptions& options);
 
     // The GLSL declarations every translated shader starts with (also used by
     // the host to lay out its buffers).

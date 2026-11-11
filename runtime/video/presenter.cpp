@@ -29,7 +29,9 @@
 #include "vblank_lock.h"
 #include "refresh_multiple.h"
 #include "refresh_notice.h"
+#include "steam_device.h"
 #include "display_tone.h"
+#include "hdr_output.h"
 #include "fsr1.h"
 #include "upscale.h"
 #include <ui/ui.h>
@@ -55,6 +57,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <format>
 #include <iterator>
 #include <unordered_set>
@@ -80,6 +83,40 @@ namespace video
 
         VkSwapchainKHR s_swapchain = VK_NULL_HANDLE;
         VkFormat s_swapFormat = VK_FORMAT_B8G8R8A8_UNORM;
+        VkColorSpaceKHR s_swapColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        // HDR: EDR or HDR10 on a Mac; HDR10 on Linux, SteamOS and Windows
+        // (where the surface offers it: the system is in HDR, or gamescope's
+        // HDR output is on); not on iOS or Android.
+#if (defined(__APPLE__) && TARGET_OS_IOS) || defined(__ANDROID__)
+        constexpr bool kHdrOffered = false;
+#else
+        constexpr bool kHdrOffered = true;
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IOS
+        constexpr bool kEdrOffered = true;
+#else
+        constexpr bool kEdrOffered = false;
+#endif
+        constexpr VkFormat kSdrFormat = VK_FORMAT_B8G8R8A8_UNORM;
+        bool s_swapchainColorspaceExt = false;  // VK_EXT_swapchain_colorspace enabled
+        bool s_hdrSetting = false;              // Settings > Display > HDR Output, this run
+        int32_t s_hdrFormat = 0;                // Settings > Display > HDR Format (0 Auto, 1 EDR, 2 HDR10)
+        bool s_swapHdr = false;                 // the current swapchain is HDR (either encoding)
+        bool s_swapPq = false;                  // ... and HDR10/PQ rather than extended linear
+        bool s_edrUnavailable = false;          // no extended-linear pair on this surface
+        bool s_pqUnavailable = false;           // no PQ pair, or no VK_EXT_hdr_metadata
+        bool s_hdrMetadataExt = false;          // VK_EXT_hdr_metadata enabled
+        PFN_vkSetHdrMetadataEXT s_setHdrMetadata = nullptr;
+        int32_t s_hdrStrength = 2;              // Settings > Display > HDR Strength (2, 3, or 4)
+        float s_hdrPaperWhite = 100.0f;         // HDR10's SDR white in nits (Settings > Display > HDR Paper White)
+        float s_hdrHeadroom = 1.0f;
+        float s_hdrPeakBase = 1.0f;             // strength, or the EDR headroom when smaller
+        float s_hdrPeak = 1.0f;                 // after the frame-average limiter
+        std::string s_hdrStatus = "Standard range";  // for the settings help
+
+        // The format every picture/UI pass renders into: the swapchain itself
+        // in SDR, or the 8-bit offscreen targets in HDR.
+        VkFormat TargetFormat() { return s_swapHdr ? kSdrFormat : s_swapFormat; }
         VkExtent2D s_swapExtent{};
         // The last swapchain's extent (width << 32 | height), for FrameRegion
         // on other threads: the renderer's Auto internal resolution follows it.
@@ -141,7 +178,7 @@ namespace video
         // each pass's post-processing GPU time per frame (anti-aliasing and
         // the UI included, as in [perf]): the same scenes, the same clocks.
         const bool s_upscaleAb = [] { const char* v = std::getenv("NFSMW_UPSCALE_AB"); return v && v[0] == '1'; }();
-        uint64_t s_abFrames[3]{}, s_abNs[3]{}, s_abAaNs[3]{};  // by upscale::Pass; main thread
+        uint64_t s_abFrames[upscale::kPassCount]{}, s_abNs[upscale::kPassCount]{}, s_abAaNs[upscale::kPassCount]{};  // by upscale::Pass; main thread
         std::vector<VkSemaphore> s_renderDone;  // one per swapchain image
         std::mutex s_queueMutex;
         VulkanContext s_context{};
@@ -189,6 +226,7 @@ namespace video
         // vblank it was handed over in: with the real picture of its step
         // handed over in the same vblank, that would be after it.
         uint64_t s_submitSeq = 0, s_pendingSeq = 0, s_betweenSeq = 0;
+        uint64_t s_lastSeq = 0;  // the shown image's s_submitSeq (NFSMW_SHARP_UI_AB's capture lines)
 #if !defined(__APPLE__)
         int64_t s_lastRealAt = 0;
 #endif
@@ -342,6 +380,55 @@ namespace video
             if (r != VK_SUCCESS)
                 fprintf(stderr, "[video] %s failed: %d\n", what, int(r));
             return r == VK_SUCCESS;
+        }
+
+        const char* FormatName(VkFormat format)
+        {
+            switch (format)
+            {
+            case VK_FORMAT_R16G16B16A16_SFLOAT: return "R16G16B16A16_SFLOAT";
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
+            case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+            case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+            case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
+            case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
+            default: return "other";
+            }
+        }
+
+        const char* ColorSpaceName(VkColorSpaceKHR colorSpace)
+        {
+            switch (colorSpace)
+            {
+            case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: return "sRGB";
+            case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT: return "extended linear sRGB";
+            case VK_COLOR_SPACE_HDR10_ST2084_EXT: return "HDR10 ST2084";
+            default: return "other";
+            }
+        }
+
+        // HDR10's static metadata: Rec.2020 primaries, D65, the HDR Strength
+        // peak, and the frame-average target the limiter holds to.
+        // HDR Paper White as applied: Auto follows the system (hdr::PaperWhiteNits);
+        // gamescope is the one that sets GAMESCOPE_WAYLAND_DISPLAY for its clients.
+        float PaperWhiteSetting()
+        {
+            static const bool gamescope = std::getenv("GAMESCOPE_WAYLAND_DISPLAY") != nullptr;
+            return hdr::PaperWhiteNits(settings::GetInt(settings::Id::HdrPaperWhite), kEdrOffered, gamescope);
+        }
+
+        VkHdrMetadataEXT Hdr10Metadata(float peakNits, float paperWhiteNits)
+        {
+            VkHdrMetadataEXT m{ VK_STRUCTURE_TYPE_HDR_METADATA_EXT };
+            m.displayPrimaryRed = { 0.708f, 0.292f };
+            m.displayPrimaryGreen = { 0.170f, 0.797f };
+            m.displayPrimaryBlue = { 0.131f, 0.046f };
+            m.whitePoint = { 0.3127f, 0.3290f };
+            m.maxLuminance = peakNits;
+            m.minLuminance = 0.005f;
+            m.maxContentLightLevel = peakNits;
+            m.maxFrameAverageLightLevel = paperWhiteNits;  // the frame-average limiter's level
+            return m;
         }
 
         uint32_t FindMemoryType(uint32_t bits, VkMemoryPropertyFlags flags)
@@ -850,6 +937,11 @@ namespace video
                 fprintf(stderr, "[vblank] %s\n", line.c_str());
         }
 
+        bool EnsureHdrTargets();
+        void DestroyHdrTargets();
+        bool EnsureHdrPipeline();
+        bool EnsureHdrAverage();
+
         void DestroySwapchain()
         {
             {
@@ -868,6 +960,7 @@ namespace video
                 vkDestroySwapchainKHR(s_device, s_swapchain, nullptr);
             s_swapchain = VK_NULL_HANDLE;
             s_swapImages.clear();
+            DestroyHdrTargets();
         }
 
         bool CreateSwapchain()
@@ -908,21 +1001,127 @@ namespace video
             // B8G8R8A8_UNORM entry is Display P3 *linear*: the layer showed
             // the picture's values as linear light, washed out and pale
             // (captures of the swapchain looked right: its values were).
-            auto pick = [&](VkFormat format) {
+            // HDR is either extended linear sRGB with a 16F swapchain (macOS
+            // EDR) or HDR10/PQ with a 10-bit swapchain plus static metadata;
+            // both are decoded/encoded in the presenter's composite pass,
+            // never linear values in an 8-bit format.
+            auto pick = [&](VkFormat format, VkColorSpaceKHR colorSpace) {
                 return std::find_if(formats.begin(), formats.end(), [&](const VkSurfaceFormatKHR& f) {
-                    return (format == VK_FORMAT_UNDEFINED || f.format == format) && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+                    return (format == VK_FORMAT_UNDEFINED || f.format == format) && f.colorSpace == colorSpace;
                 });
             };
-            auto chosen = pick(VK_FORMAT_B8G8R8A8_UNORM);
+            // (EDR is macOS's alone: elsewhere extended linear sRGB is scRGB,
+            // whose 1.0 is 80 nits and whose SDR white the system sets.)
+            auto edr = kEdrOffered ? pick(VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) : formats.end();
+            auto pq = pick(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT);
+            if (pq == formats.end())
+                pq = pick(VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT);
+            if (pq == formats.end())
+                pq = pick(VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_HDR10_ST2084_EXT);
+            const bool hdrPossible = s_hdrSetting && kHdrOffered && s_swapchainColorspaceExt;
+            float headroom = 1.0f, potential = 1.0f;
+#if defined(__APPLE__) && !TARGET_OS_IOS
+            if (hdrPossible)
+            {
+                headroom = platform::macos::DisplayHeadroom(s_window);
+                potential = platform::macos::DisplayPotentialHeadroom(s_window);
+            }
+#endif
+            bool wantEdr = false, wantPq = false;
+            if (hdrPossible && !kEdrOffered)
+                // HDR10 where the surface offers it: a system in HDR (or
+                // gamescope with its HDR output on) lists the HDR10 formats;
+                // otherwise standard range, as Auto does on a Mac without HDR.
+                wantPq = pq != formats.end();
+            else if (hdrPossible)
+            {
+                if (s_hdrFormat == 1)
+                    wantEdr = true;
+                else if (s_hdrFormat == 2)
+                    wantPq = true;
+                else
+                    // Auto: EDR where the screen can show it at all (its
+                    // potential headroom), even while the current headroom is
+                    // still 1 until EDR content is up; standard range where it
+                    // cannot. HDR10 stays an explicit choice.
+                    wantEdr = potential > 1.01f;
+            }
+            const bool autoNoHdr = hdrPossible && (kEdrOffered ? s_hdrFormat == 0 && potential <= 1.01f : !wantPq);
+            if (wantEdr && (edr == formats.end() || s_edrUnavailable))
+            {
+                if (!s_edrUnavailable)
+                    fprintf(stderr, "[video] HDR: the surface offers no R16G16B16A16_SFLOAT in extended linear sRGB; trying HDR10\n");
+                s_edrUnavailable = true;
+                wantEdr = false;
+                wantPq = true;
+            }
+            if (wantPq && (pq == formats.end() || !s_hdrMetadataExt || s_pqUnavailable))
+            {
+                if (!s_pqUnavailable)
+                    fprintf(stderr, "[video] HDR10: %s; %s\n",
+                        pq == formats.end() ? "the surface offers no PQ swapchain format" : "VK_EXT_hdr_metadata isn't available",
+                        edr != formats.end() && !s_edrUnavailable ? "extended linear instead" : "standard range");
+                s_pqUnavailable = true;
+                wantPq = false;
+            }
+            if (!wantEdr && !wantPq && hdrPossible && !autoNoHdr)
+                wantEdr = edr != formats.end() && !s_edrUnavailable;
+            auto chosen = wantEdr ? edr : wantPq ? pq : formats.end();
             if (chosen == formats.end())
-                chosen = pick(VK_FORMAT_UNDEFINED);
+                chosen = pick(kSdrFormat, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+            if (chosen == formats.end())
+                chosen = pick(VK_FORMAT_UNDEFINED, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
             if (chosen == formats.end())
                 chosen = formats.begin();
             s_swapFormat = chosen->format;
-            VkColorSpaceKHR colorSpace = chosen->colorSpace;
-            static bool formatLogged = false;
-            if (!std::exchange(formatLogged, true))
-                fprintf(stderr, "[video] swapchain format %d, color space %d (%zu offered)\n", int(s_swapFormat), int(colorSpace), formats.size());
+            s_swapColorSpace = chosen->colorSpace;
+            s_swapHdr = wantEdr || wantPq;
+            s_swapPq = wantPq;
+            s_hdrHeadroom = hdrPossible ? headroom : 1.0f;
+            s_hdrPeakBase = s_swapPq ? float(s_hdrStrength) : std::min(hdr::PeakForHeadroom(headroom), float(s_hdrStrength));
+            s_hdrPeak = s_hdrPeakBase;
+            static int lastAuto = -2;
+            const int autoChoice = wantEdr ? 0 : wantPq ? 1 : 2;
+            if (hdrPossible && s_hdrFormat == 0 && autoChoice != lastAuto)
+            {
+                lastAuto = autoChoice;
+                fprintf(stderr, "[video] HDR: Auto chose %s\n",
+                    wantEdr ? std::format("Extended Linear (potential headroom {:.2f})", potential).c_str()
+                    : wantPq ? (kEdrOffered ? "HDR10 (Extended Linear is unavailable)" : "HDR10")
+                    : kEdrOffered ? "standard range (the display reports no HDR)"
+                                  : "standard range (the surface offers no HDR10: is the system's HDR on?)");
+            }
+            if (s_swapHdr && (!EnsureHdrTargets() || !EnsureHdrPipeline()))
+            {
+                fprintf(stderr, "[video] HDR: its offscreen targets or composite pipeline couldn't be made; standard range\n");
+                s_swapHdr = false;
+                s_swapPq = false;
+                s_hdrSetting = false;
+                s_edrUnavailable = s_pqUnavailable = true;
+                DestroyHdrTargets();
+                auto sdr = pick(kSdrFormat, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+                if (sdr == formats.end())
+                    sdr = pick(VK_FORMAT_UNDEFINED, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+                if (sdr == formats.end())
+                    sdr = formats.begin();
+                s_swapFormat = sdr->format;
+                s_swapColorSpace = sdr->colorSpace;
+                s_hdrHeadroom = 1.0f;
+                s_hdrPeak = 1.0f;
+            }
+            s_hdrStatus = s_swapPq ? std::format("HDR10 (PQ), up to {:.0f} nits", float(s_hdrStrength) * s_hdrPaperWhite)
+                : s_swapHdr ? std::format("Extended Linear (EDR), up to {:.2f}x", s_hdrPeakBase) : "Standard range";
+            static VkFormat loggedFormat = VK_FORMAT_UNDEFINED;
+            static VkColorSpaceKHR loggedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+            if (s_swapFormat != loggedFormat || s_swapColorSpace != loggedColorSpace)
+            {
+                loggedFormat = s_swapFormat;
+                loggedColorSpace = s_swapColorSpace;
+                fprintf(stderr, "[video] swapchain: %s (%s, %s%s)\n", s_swapPq ? "HDR10" : s_swapHdr ? "HDR" : "SDR",
+                    FormatName(s_swapFormat), ColorSpaceName(s_swapColorSpace),
+                    s_swapPq ? std::format(", up to {:.0f} nits", float(s_hdrStrength) * s_hdrPaperWhite).c_str()
+                    : s_swapHdr ? std::format(", up to {:.2f}x", s_hdrPeakBase).c_str() : "");
+            }
 
             VkSwapchainCreateInfoKHR info{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
             info.surface = s_surface;
@@ -939,7 +1138,7 @@ namespace video
             if (caps.maxImageCount)
                 info.minImageCount = std::min(info.minImageCount, caps.maxImageCount);
             info.imageFormat = s_swapFormat;
-            info.imageColorSpace = colorSpace;
+            info.imageColorSpace = s_swapColorSpace;
             info.imageExtent = s_swapExtent;
             info.imageArrayLayers = 1;
             info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -967,6 +1166,17 @@ namespace video
             info.clipped = VK_TRUE;
             if (!Check(vkCreateSwapchainKHR(s_device, &info, nullptr, &s_swapchain), "vkCreateSwapchainKHR"))
                 return false;
+            if (s_swapPq && s_setHdrMetadata)
+            {
+                const VkHdrMetadataEXT metadata = Hdr10Metadata(float(s_hdrStrength) * s_hdrPaperWhite, s_hdrPaperWhite);
+                s_setHdrMetadata(s_device, 1, &s_swapchain, &metadata);
+            }
+#if defined(__APPLE__) && !TARGET_OS_IOS
+            // HDR10's metadata outlives its swapchain on the layer (see
+            // ClearEdrMetadata): any other swapchain drops it.
+            if (!s_swapPq)
+                platform::macos::ClearEdrMetadata(s_window);
+#endif
             {
                 // Once per change: the V-Sync setting's effect, in the log.
                 static int logged = -1;
@@ -982,7 +1192,7 @@ namespace video
             }
             s_swapchainGeneration = s_swapchainUse.Publish(s_swapchain);
             if (s_uiReady)
-                ui::SetFormat(s_swapFormat);
+                ui::SetFormat(TargetFormat());
             s_swapPolicy.Created({ s_swapExtent.width, s_swapExtent.height });
             static VkExtent2D logged{};
             const char* reason = std::exchange(s_swapReason, nullptr);
@@ -1129,23 +1339,25 @@ namespace video
             vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
         }
 
-        // A copy of part of a swapchain image on its way to the host.
+        // A copy of part of a rendered image on its way to the host.
         struct RegionCapture
         {
             VkBuffer buffer = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
             uint32_t width = 0, height = 0;
+            VkFormat format = VK_FORMAT_UNDEFINED;
         };
 
         // Records a copy of `rect` of `image` (in `layout`, last written at
         // `stage` with `access`) into a host-visible buffer, and puts the
         // image back in `layout` for the writes that follow.
-        RegionCapture RecordRegionCapture(VkCommandBuffer cmd, VkImage image, VkImageLayout layout, VkAccessFlags access,
-            VkPipelineStageFlags stage, VkRect2D rect)
+        RegionCapture RecordRegionCapture(VkCommandBuffer cmd, VkImage image, VkFormat format, VkImageLayout layout,
+            VkAccessFlags access, VkPipelineStageFlags stage, VkRect2D rect)
         {
             RegionCapture c;
             c.width = rect.extent.width;
             c.height = rect.extent.height;
+            c.format = format;
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = VkDeviceSize(c.width) * c.height * 4;
             bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1185,8 +1397,8 @@ namespace video
         CapturedFrame FinishRegionCapture(RegionCapture& c)
         {
             CapturedFrame frame;
-            const bool bgr = s_swapFormat == VK_FORMAT_B8G8R8A8_UNORM || s_swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
-            const bool rgb = s_swapFormat == VK_FORMAT_R8G8B8A8_UNORM || s_swapFormat == VK_FORMAT_R8G8B8A8_SRGB;
+            const bool bgr = c.format == VK_FORMAT_B8G8R8A8_UNORM || c.format == VK_FORMAT_B8G8R8A8_SRGB;
+            const bool rgb = c.format == VK_FORMAT_R8G8B8A8_UNORM || c.format == VK_FORMAT_R8G8B8A8_SRGB;
             void* mapped = nullptr;
             if ((bgr || rgb) && vkMapMemory(s_device, c.memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS)
             {
@@ -1369,6 +1581,45 @@ void setSpan()
     spanHi = (vec2(sx.y, sy.y) - 0.5) / p.size;
 }
 
+// Movie Upscaling's Lanczos pass (bicubic == 2, video/upscale.h): Lanczos-2
+// over the 4x4 texels around the sample, clamped to the 2x2 it falls
+// between (no ringing), without sharpening.
+float lanczos2(float x)
+{
+    x = abs(x);
+    if (x < 1e-4)
+        return 1.0;
+    if (x >= 2.0)
+        return 0.0;
+    float px = 3.14159265 * x;
+    return 2.0 * sin(px) * sin(px * 0.5) / (px * px);
+}
+vec3 lanczos(vec2 t, vec2 texel)
+{
+    vec2 pos = t * p.size;
+    vec2 c = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - c;
+    vec3 sum = vec3(0.0), lo = vec3(1e30), hi = vec3(-1e30);
+    float total = 0.0;
+    for (int j = -1; j <= 2; j++)
+    {
+        float wy = lanczos2(float(j) - f.y);
+        for (int i = -1; i <= 2; i++)
+        {
+            float wt = lanczos2(float(i) - f.x) * wy;
+            vec3 s = at((c + vec2(float(i), float(j))) * texel);
+            sum += s * wt;
+            total += wt;
+            if (i >= 0 && i <= 1 && j >= 0 && j <= 1)
+            {
+                lo = min(lo, s);
+                hi = max(hi, s);
+            }
+        }
+    }
+    return clamp(sum / total, lo, hi);
+}
+
 // Catmull-Rom bicubic from 9 bilinear taps: the middle two weights of each
 // axis are folded into one bilinear fetch.
 vec3 catmullRom(vec2 t, vec2 texel)
@@ -1390,6 +1641,11 @@ vec3 catmullRom(vec2 t, vec2 texel)
 void main()
 {
     setSpan();
+    if (p.bicubic == 2u)
+    {
+        color = vec4(lanczos(uv, 1.0 / p.size), 1.0);
+        return;
+    }
     if (p.bicubic == 0u)
     {
         color = vec4(at(uv), 1.0);
@@ -1436,6 +1692,45 @@ vec2 spanOf(float t, float lo, float hi, float size)
     return t < lo ? vec2(0.0, lo) : t < hi ? vec2(lo, hi) : vec2(hi, size);
 }
 
+// Movie Upscaling's Lanczos pass (bicubic == 2, video/upscale.h): Lanczos-2
+// over the 4x4 texels around the sample, clamped to the 2x2 it falls
+// between (no ringing), without sharpening.
+float lanczos2(float x)
+{
+    x = abs(x);
+    if (x < 1e-4)
+        return 1.0;
+    if (x >= 2.0)
+        return 0.0;
+    float px = 3.14159265 * x;
+    return 2.0 * sin(px) * sin(px * 0.5) / (px * px);
+}
+vec3 lanczos(vec2 t, vec2 texel)
+{
+    vec2 pos = t * p.size;
+    vec2 c = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - c;
+    vec3 sum = vec3(0.0), lo = vec3(1e30), hi = vec3(-1e30);
+    float total = 0.0;
+    for (int j = -1; j <= 2; j++)
+    {
+        float wy = lanczos2(float(j) - f.y);
+        for (int i = -1; i <= 2; i++)
+        {
+            float wt = lanczos2(float(i) - f.x) * wy;
+            vec3 s = at((c + vec2(float(i), float(j))) * texel);
+            sum += s * wt;
+            total += wt;
+            if (i >= 0 && i <= 1 && j >= 0 && j <= 1)
+            {
+                lo = min(lo, s);
+                hi = max(hi, s);
+            }
+        }
+    }
+    return clamp(sum / total, lo, hi);
+}
+
 void main()
 {
     vec2 sx = vec2(0.0), sy = vec2(0.0);
@@ -1446,6 +1741,11 @@ void main()
         sy = spanOf(pos.y, p.band.z, p.band.w, p.size.y);
         spanLo = (vec2(sx.x, sy.x) + 0.5) / p.size;
         spanHi = (vec2(sx.y, sy.y) - 0.5) / p.size;
+    }
+    if (p.bicubic == 2u)
+    {
+        color = vec4(lanczos(uv, 1.0 / p.size), 1.0);
+        return;
     }
     if (p.bicubic == 0u)
     {
@@ -1496,12 +1796,12 @@ void main()
 #endif
         const bool s_fastScale = [] { const char* v = std::getenv("NFSMW_FAST_SCALE"); return v ? v[0] == '1' : kFastScaleByDefault; }();
 
-        // Brightness and the 360's display gamma (video/display_tone.h): the
+        // Brightness, the 360's display gamma and Cooler Colors (video/display_tone.h): the
         // scale shader in use, its main renamed scaleMain, then this main,
         // which looks each channel of its result up in the tone table (256
         // entries for the values k/255, linear between them). The tables
-        // are made on the CPU. With Brightness 0 and the 360's gamma off the
-        // plain scale pipeline draws, so that picture (v0.1.3's) is the same,
+        // are made on the CPU. With Brightness 0, the 360's gamma off and
+        // Cooler Colors off the plain scale pipeline draws, so that picture (v0.1.3's) is the same,
         // bit for bit, as without this.
         const char* kToneGlsl = R"(
 layout(set = 0, binding = 1) uniform sampler2D toneTable;
@@ -1517,6 +1817,180 @@ void main()
 {
     scaleMain();
     color = vec4(toneOf(color.rgb), color.a);
+}
+)";
+
+        // HDR's last pass: the SDR scene (sRGB-encoded, 8-bit) expanded into
+        // the display's headroom, then the SDR UI (premultiplied, sRGB) over
+        // it. EDR outputs linear light for the extended-linear swapchain;
+        // HDR10 outputs PQ code values for the 10-bit HDR10 swapchain.
+        const char* kHdrCompositeFs = R"(#version 460
+layout(location = 0) in vec2 uv;
+layout(location = 0) out vec4 color;
+layout(set = 0, binding = 0) uniform sampler2D sceneTex;  // B8G8R8A8_UNORM, sRGB-encoded
+layout(set = 0, binding = 1) uniform sampler2D uiTex;     // B8G8R8A8_UNORM, premultiplied, sRGB-encoded
+layout(std430, set = 0, binding = 2) readonly buffer State { float smoothed; float average; float localV8[576]; } st;  // kHdrAverageCs, this frame
+layout(push_constant) uniform P { float peak; float sdrWhiteNits; uint pq; float localBudget; } p;
+
+// hdr::FramePeak: keep peak * average at SDR white, so a mostly white frame
+// isn't a full-screen flash; darker frames keep the requested peak.
+float framePeak(float base, float average)
+{
+    base = max(base, 1.0);
+    average = clamp(average, 0.0, 1.0);
+    return average > 0.0 ? clamp(min(base, 1.0 / average), 1.0, base) : base;
+}
+
+vec3 srgbToLinear(vec3 c)
+{
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));
+}
+
+vec3 linearToSrgb(vec3 c)
+{
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(hi, lo, lessThanEqual(c, vec3(0.0031308)));
+}
+
+// hdr::LocalScale: the share of the added light this pixel keeps, so that
+// its neighbourhood (kHdrAverageCs's 3x3 cells' mean v^8, between cell
+// centres) adds at most localBudget of SDR white; 0 turns it off.
+float localScale(vec2 uv, float peak)
+{
+    if (p.localBudget <= 0.0)
+        return 1.0;
+    vec2 pos = clamp(uv * vec2(32.0, 18.0) - 0.5, vec2(0.0), vec2(31.0, 17.0));
+    ivec2 c0 = ivec2(floor(pos));
+    ivec2 c1 = min(c0 + 1, ivec2(31, 17));
+    vec2 f = pos - vec2(c0);
+    float v8 = mix(mix(st.localV8[c0.y * 32 + c0.x], st.localV8[c0.y * 32 + c1.x], f.x),
+        mix(st.localV8[c1.y * 32 + c0.x], st.localV8[c1.y * 32 + c1.x], f.x), f.y);
+    float added = (max(peak, 1.0) - 1.0) * max(v8, 0.0);
+    return added <= p.localBudget ? 1.0 : p.localBudget / added;
+}
+
+vec3 expand(vec3 v, float peak, float scale)
+{
+    // Expand the light, not each channel: the ratio between channels (hue
+    // and saturation) stays.
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    float l = dot(v, luma);
+    float e = l + scale * (peak - 1.0) * pow(l, 8.0);
+    return l > 0.0 ? v * (e / l) : v;
+}
+
+vec3 rec709ToRec2020(vec3 c)
+{
+    return vec3(
+        0.6274040 * c.r + 0.3292820 * c.g + 0.0433136 * c.b,
+        0.0690970 * c.r + 0.9195400 * c.g + 0.0113612 * c.b,
+        0.0163916 * c.r + 0.0880132 * c.g + 0.8955950 * c.b);
+}
+
+vec3 nitsToPq(vec3 nits)
+{
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 4096.0 * 128.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 128.0;
+    const float c3 = 2392.0 / 128.0;
+    vec3 y = pow(clamp(nits, 0.0, 10000.0) / 10000.0, vec3(m1));
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), vec3(m2));
+}
+
+void main()
+{
+    float peak = framePeak(p.peak, st.smoothed);
+    vec3 scene = expand(srgbToLinear(texture(sceneTex, uv).rgb), peak, localScale(uv, peak));
+    vec4 ui = texture(uiTex, uv);
+    // hdr::BlendUi: ImGui blends into a transparent target with SRC_ALPHA,
+    // so the stored RGB is premultiplied, sRGB-encoded. It goes over the
+    // scene as in SDR (where ImGui draws on the UNORM swapchain): blended in
+    // sRGB-encoded values, not linear light, which let a dark translucent
+    // panel show the game far brighter in HDR. The scene up to SDR white is
+    // encoded, the UI blended over it, decoded; the light above SDR white is
+    // removed where the UI covers the pixel (hdr::UiHighlightShare, gone
+    // from coverage 1/16 = hdr::kUiSdrCoverage up, smoothstep below it for
+    // anti-aliased fringes): the overlay stays at standard brightness, so
+    // the scene under it is SDR, and the UI's own white stays SDR white.
+    // With no UI (a = 0) the highlights keep their full strength.
+    vec3 sdr = min(scene, vec3(1.0));
+    vec3 uiOver = clamp(linearToSrgb(sdr) * (1.0 - ui.a) + ui.rgb, 0.0, 1.0);
+    vec3 outLinear = srgbToLinear(uiOver) + (scene - sdr) * (1.0 - smoothstep(0.0, 0.0625, ui.a));
+    if (p.pq != 0u)
+        outLinear = nitsToPq(rec709ToRec2020(outLinear) * p.sdrWhiteNits);
+    color = vec4(outLinear, 1.0);
+}
+)";
+
+        // A coarse average of the SDR scene's linear-light luma, for the
+        // frame-average limiter: one workgroup, a thread per 32x18 cell
+        // sampling a 16x16 grid across it, the cells summed in shared memory,
+        // then hdr::SmoothAverage into the state the composite reads next.
+        // Each cell also keeps its mean luma^8 (the shape of the light Expand
+        // adds) averaged over the 3x3 cells around it, for the local limit
+        // (hdr::LocalScale): this frame's, not smoothed.
+        const char* kHdrAverageCs = R"(#version 460
+layout(local_size_x = 32, local_size_y = 18) in;
+layout(set = 0, binding = 0) uniform sampler2D sceneTex;  // B8G8R8A8_UNORM, sRGB-encoded
+layout(std430, set = 0, binding = 1) buffer State { float smoothed; float average; float localV8[576]; } st;
+
+shared float cells[576];
+shared float cellsV8[576];
+
+vec3 srgbToLinear(vec3 c)
+{
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));
+}
+
+void main()
+{
+    ivec2 size = textureSize(sceneTex, 0);
+    ivec2 cell = ivec2(gl_LocalInvocationID.xy);
+    vec2 grid = vec2(32.0, 18.0);
+    float sum = 0.0, sumV8 = 0.0;
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
+        {
+            vec2 uv = (vec2(cell) + (vec2(x, y) + 0.5) / 16.0) / grid;
+            ivec2 p = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+            vec3 linear = srgbToLinear(texelFetch(sceneTex, p, 0).rgb);
+            float l = clamp(dot(linear, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+            sum += l;
+            sumV8 += pow(l, 8.0);
+        }
+    cells[gl_LocalInvocationIndex] = sum / 256.0;
+    cellsV8[gl_LocalInvocationIndex] = sumV8 / 256.0;
+    barrier();
+    float near = 0.0, count = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            ivec2 n = cell + ivec2(dx, dy);
+            if (all(greaterThanEqual(n, ivec2(0))) && all(lessThan(n, ivec2(32, 18))))
+            {
+                near += cellsV8[n.y * 32 + n.x];
+                count += 1.0;
+            }
+        }
+    st.localV8[gl_LocalInvocationIndex] = near / count;
+    if (gl_LocalInvocationIndex == 0u)
+    {
+        float total = 0.0;
+        for (uint i = 0u; i < 576u; ++i)
+            total += cells[i];
+        float average = clamp(total / 576.0, 0.0, 1.0);
+        // hdr::SmoothAverage: up at once, down by 0.15 of the gap a frame.
+        float smoothed = st.smoothed;
+        st.smoothed = average > smoothed ? average : smoothed + (average - smoothed) * 0.15;
+        st.average = average;
+    }
 }
 )";
 
@@ -1552,6 +2026,7 @@ void main()
             bool filled = false;
             int32_t brightness = 0;
             bool ramp = false;
+            bool coolerColors = false;
             uint64_t rampGeneration = 0;
         } s_tone;
 
@@ -1571,6 +2046,92 @@ void main()
             VkImageView aaView = VK_NULL_HANDLE;
             uint32_t aaWidth = 0, aaHeight = 0;
         } s_post;
+
+        // HDR Output's offscreen targets: the game's picture (SDR, 8-bit,
+        // sRGB-encoded) and the UI over it, composited into the HDR
+        // extended-linear swapchain (video/hdr_output.h).
+        struct HdrTargets
+        {
+            VkImage scene = VK_NULL_HANDLE, ui = VK_NULL_HANDLE;
+            VkDeviceMemory sceneMemory = VK_NULL_HANDLE, uiMemory = VK_NULL_HANDLE;
+            VkImageView sceneView = VK_NULL_HANDLE, uiView = VK_NULL_HANDLE;
+            uint32_t width = 0, height = 0;
+        } s_hdrTargets;
+
+        struct HdrComposite
+        {
+            VkSampler sampler = VK_NULL_HANDLE;
+            VkDescriptorSetLayout set = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkFormat format = VK_FORMAT_UNDEFINED;  // the swapchain format the pipeline was made for
+            PFN_vkCmdPushDescriptorSetKHR push = nullptr;
+            // The frame-average limiter's state, { smoothed, average, localV8[576] }: written
+            // by kHdrAverageCs earlier in the same frame, read by the
+            // composite, kept from frame to frame for the slow release.
+            // Host-visible only for NFSMW_HDR_AVG_LOG.
+            VkBuffer state = VK_NULL_HANDLE;
+            VkDeviceMemory stateMemory = VK_NULL_HANDLE;
+            const float* stateMapped = nullptr;
+        } s_hdrComposite;
+
+        constexpr size_t kHdrStateFloats = 2 + 32 * 18;
+
+        struct HdrPush
+        {
+            float peak;         // before the limiter: EDR: headroom or HDR Strength; PQ: HDR Strength (200..400 nits / 100)
+            float sdrWhiteNits; // EDR: 1.0; PQ: 100.0
+            uint32_t pq;        // 0: linear EDR; 1: PQ encode
+            float localBudget;  // hdr::LocalScale's budget (kLocalBudget, NFSMW_HDR_LOCAL_BUDGET; 0: off)
+        };
+        static_assert(sizeof(HdrPush) == 16);
+
+
+        // The scene's average SDR luma, measured on the GPU just before the
+        // composite that uses it (the same frame: a one- or two-frame white
+        // flash is dimmed itself, not the frames after it), so a full-white
+        // frame lowers the peak rather than becoming a full-screen flash.
+        struct HdrAverage
+        {
+            VkDescriptorSetLayout set = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkShaderModule module = VK_NULL_HANDLE;
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            float smoothed = 0.0f;  // the host's latest look at the state (log and status only)
+            bool ready = false;
+        } s_hdrAverage;
+
+        void DestroyHdrAverage()
+        {
+            if (s_hdrAverage.pipeline)
+                vkDestroyPipeline(s_device, s_hdrAverage.pipeline, nullptr);
+            if (s_hdrAverage.module)
+                vkDestroyShaderModule(s_device, s_hdrAverage.module, nullptr);
+            if (s_hdrAverage.layout)
+                vkDestroyPipelineLayout(s_device, s_hdrAverage.layout, nullptr);
+            if (s_hdrAverage.set)
+                vkDestroyDescriptorSetLayout(s_device, s_hdrAverage.set, nullptr);
+            s_hdrAverage = {};
+        }
+
+        void DestroyHdrTargets()
+        {
+            DestroyHdrAverage();
+            if (s_hdrTargets.sceneView)
+                vkDestroyImageView(s_device, s_hdrTargets.sceneView, nullptr);
+            if (s_hdrTargets.uiView)
+                vkDestroyImageView(s_device, s_hdrTargets.uiView, nullptr);
+            if (s_hdrTargets.scene)
+                vkDestroyImage(s_device, s_hdrTargets.scene, nullptr);
+            if (s_hdrTargets.ui)
+                vkDestroyImage(s_device, s_hdrTargets.ui, nullptr);
+            if (s_hdrTargets.sceneMemory)
+                vkFreeMemory(s_device, s_hdrTargets.sceneMemory, nullptr);
+            if (s_hdrTargets.uiMemory)
+                vkFreeMemory(s_device, s_hdrTargets.uiMemory, nullptr);
+            s_hdrTargets = {};
+        }
         // Read every frame: the settings menu changes them live.
         bool AaEnabled() { return settings::GetBool(settings::Id::AntiAliasing); }
         bool Bicubic() { return settings::GetInt(settings::Id::Scaling) == int32_t(settings::ScalingMode::Bicubic); }
@@ -1593,13 +2154,202 @@ void main()
             return module;
         }
 
-        // A scale pipeline (the plain one or the tone variant) for the
-        // swapchain's format; VK_NULL_HANDLE if it can't be made.
-        VkPipeline MakeScalePipeline(VkShaderModule fs, VkPipelineLayout layout)
+        // The offscreen scene and UI images, at the swapchain's size. Called
+        // before vkCreateSwapchainKHR (the caller is idle).
+        bool EnsureHdrTargets()
         {
+            if (!s_swapHdr)
+                return true;
+            if (s_hdrTargets.scene && s_hdrTargets.width == s_swapExtent.width && s_hdrTargets.height == s_swapExtent.height)
+                return true;
+            DestroyHdrTargets();
+            auto create = [&](VkImage& image, VkDeviceMemory& memory, VkImageView& view, VkImageUsageFlags usage) {
+                VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+                ii.imageType = VK_IMAGE_TYPE_2D;
+                ii.format = kSdrFormat;
+                ii.extent = { s_swapExtent.width, s_swapExtent.height, 1 };
+                ii.mipLevels = 1;
+                ii.arrayLayers = 1;
+                ii.samples = VK_SAMPLE_COUNT_1_BIT;
+                ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+                ii.usage = usage;
+                if (!Check(vkCreateImage(s_device, &ii, nullptr, &image), "HDR target image"))
+                    return false;
+                VkMemoryRequirements req;
+                vkGetImageMemoryRequirements(s_device, image, &req);
+                VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                ai.allocationSize = req.size;
+                ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                if (ai.memoryTypeIndex == UINT32_MAX || !Check(vkAllocateMemory(s_device, &ai, nullptr, &memory), "HDR target memory"))
+                    return false;
+                vkBindImageMemory(s_device, image, memory, 0);
+                VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+                vci.image = image;
+                vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                vci.format = kSdrFormat;
+                vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                return Check(vkCreateImageView(s_device, &vci, nullptr, &view), "HDR target view");
+            };
+            if (!create(s_hdrTargets.scene, s_hdrTargets.sceneMemory, s_hdrTargets.sceneView,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+                !create(s_hdrTargets.ui, s_hdrTargets.uiMemory, s_hdrTargets.uiView,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+            {
+                DestroyHdrTargets();
+                return false;
+            }
+            s_hdrTargets.width = s_swapExtent.width;
+            s_hdrTargets.height = s_swapExtent.height;
+            return true;
+        }
+
+        void RecordHdrAverage(VkCommandBuffer cmd);
+
+        // The SDR scene and UI decoded, expanded and composited into the HDR
+        // extended-linear swapchain (kHdrCompositeFs). Leaves the swapchain
+        // in COLOR_ATTACHMENT_OPTIMAL for the frame's capture/present steps.
+        void RecordHdrComposite(VkCommandBuffer cmd, VkImage swapchainImage, VkImageView swapchainView)
+        {
+            Barrier(cmd, s_hdrTargets.scene, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            Barrier(cmd, s_hdrTargets.ui, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            Barrier(cmd, swapchainImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            RecordHdrAverage(cmd);
+            VkRenderingAttachmentInfoKHR color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+            color.imageView = swapchainView;
+            color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            color.clearValue.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+            VkRenderingInfoKHR ri{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+            ri.renderArea = { { 0, 0 }, s_swapExtent };
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 1;
+            ri.pColorAttachments = &color;
+            s_context.cmdBeginRendering(cmd, &ri);
+            VkViewport viewport{ 0.0f, 0.0f, float(s_swapExtent.width), float(s_swapExtent.height), 0.0f, 1.0f };
+            VkRect2D scissor{ { 0, 0 }, s_swapExtent };
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_hdrComposite.pipeline);
+            VkDescriptorImageInfo scene{ s_hdrComposite.sampler, s_hdrTargets.sceneView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorImageInfo ui{ s_hdrComposite.sampler, s_hdrTargets.uiView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorBufferInfo state{ s_hdrComposite.state, 0, VK_WHOLE_SIZE };
+            VkWriteDescriptorSet writes[3] = {
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &scene, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ui, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &state, nullptr },
+            };
+            s_hdrComposite.push(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_hdrComposite.layout, 0, 3, writes);
+            static const float localBudget = [] {
+                const char* v = std::getenv("NFSMW_HDR_LOCAL_BUDGET");
+                return v ? std::max(0.0f, float(std::atof(v))) : hdr::kLocalBudget;
+            }();
+            const HdrPush pc{ s_hdrPeakBase, s_swapPq ? s_hdrPaperWhite : 1.0f, s_swapPq ? 1u : 0u, localBudget };
+            vkCmdPushConstants(cmd, s_hdrComposite.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            s_context.cmdEndRendering(cmd);
+        }
+
+        // The composite pipeline for the current HDR swapchain format.
+        bool EnsureHdrPipeline()
+        {
+            if (!s_swapHdr)
+                return true;
+            if (s_hdrComposite.pipeline && s_hdrComposite.format == s_swapFormat)
+                return EnsureHdrAverage();
+            if (s_hdrComposite.pipeline)
+            {
+                vkDestroyPipeline(s_device, s_hdrComposite.pipeline, nullptr);
+                s_hdrComposite.pipeline = VK_NULL_HANDLE;
+            }
+            if (!s_hdrComposite.push)
+            {
+                s_hdrComposite.push = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(vkGetDeviceProcAddr(s_device, "vkCmdPushDescriptorSetKHR"));
+                if (!s_hdrComposite.push)
+                    return false;
+            }
+            if (!s_hdrComposite.sampler)
+            {
+                VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+                sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+                sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+                if (!Check(vkCreateSampler(s_device, &sci, nullptr, &s_hdrComposite.sampler), "HDR sampler"))
+                    return false;
+            }
+            if (!s_hdrComposite.set)
+            {
+                VkDescriptorSetLayoutBinding bindings[3] = {
+                    { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                };
+                VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+                dslci.bindingCount = 3;
+                dslci.pBindings = bindings;
+                if (!Check(vkCreateDescriptorSetLayout(s_device, &dslci, nullptr, &s_hdrComposite.set), "HDR set layout"))
+                    return false;
+            }
+            if (!s_hdrComposite.state)
+            {
+                // { smoothed, average, localV8[576] }, zero: no limiting until a frame is measured.
+                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                bci.size = kHdrStateFloats * sizeof(float);
+                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                if (!Check(vkCreateBuffer(s_device, &bci, nullptr, &s_hdrComposite.state), "HDR state buffer"))
+                    return false;
+                VkMemoryRequirements req;
+                vkGetBufferMemoryRequirements(s_device, s_hdrComposite.state, &req);
+                VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                ai.allocationSize = req.size;
+                ai.memoryTypeIndex = FindMemoryType(req.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                void* mapped = nullptr;
+                if (ai.memoryTypeIndex == UINT32_MAX ||
+                    !Check(vkAllocateMemory(s_device, &ai, nullptr, &s_hdrComposite.stateMemory), "HDR state memory") ||
+                    !Check(vkBindBufferMemory(s_device, s_hdrComposite.state, s_hdrComposite.stateMemory, 0), "HDR state bind") ||
+                    !Check(vkMapMemory(s_device, s_hdrComposite.stateMemory, 0, VK_WHOLE_SIZE, 0, &mapped), "HDR state map"))
+                {
+                    if (s_hdrComposite.stateMemory)
+                        vkFreeMemory(s_device, s_hdrComposite.stateMemory, nullptr);
+                    vkDestroyBuffer(s_device, s_hdrComposite.state, nullptr);
+                    s_hdrComposite.state = VK_NULL_HANDLE;
+                    s_hdrComposite.stateMemory = VK_NULL_HANDLE;
+                    return false;
+                }
+                std::memset(mapped, 0, kHdrStateFloats * sizeof(float));
+                s_hdrComposite.stateMapped = static_cast<const float*>(mapped);
+            }
+            if (!s_hdrComposite.layout)
+            {
+                VkPushConstantRange range{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(HdrPush) };
+                VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+                plci.setLayoutCount = 1;
+                plci.pSetLayouts = &s_hdrComposite.set;
+                plci.pushConstantRangeCount = 1;
+                plci.pPushConstantRanges = &range;
+                if (!Check(vkCreatePipelineLayout(s_device, &plci, nullptr, &s_hdrComposite.layout), "HDR pipeline layout"))
+                    return false;
+            }
+            if (!s_hdrComposite.vs)
+                s_hdrComposite.vs = PostModule(kFullscreenVs, 0);
+            if (!s_hdrComposite.fs)
+                s_hdrComposite.fs = PostModule(kHdrCompositeFs, 1);
+            if (!s_hdrComposite.vs || !s_hdrComposite.fs)
+            {
+                fprintf(stderr, "[video] HDR: the composite shader/pipeline couldn't be made\n");
+                return false;
+            }
             VkPipelineShaderStageCreateInfo stages[2] = {
-                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, s_post.vs, "main", nullptr },
-                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr },
+                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, s_hdrComposite.vs, "main", nullptr },
+                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, s_hdrComposite.fs, "main", nullptr },
             };
             VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
             VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
@@ -1636,6 +2386,177 @@ void main()
             gpci.pMultisampleState = &ms;
             gpci.pColorBlendState = &cb;
             gpci.pDynamicState = &ds;
+            gpci.layout = s_hdrComposite.layout;
+            if (vkCreateGraphicsPipelines(s_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &s_hdrComposite.pipeline) != VK_SUCCESS)
+            {
+                s_hdrComposite.pipeline = VK_NULL_HANDLE;
+                fprintf(stderr, "[video] HDR: the composite shader/pipeline couldn't be made\n");
+                return false;
+            }
+            s_hdrComposite.format = s_swapFormat;
+            if (!EnsureHdrAverage())
+                fprintf(stderr, "[video] HDR: the frame-average limiter couldn't be made; highlights stay at HDR Strength\n");
+            return true;
+        }
+
+        // The 32x18-cell average of the scene, into the composite's state
+        // buffer. Failure only turns the frame-average limiter off.
+        bool EnsureHdrAverage()
+        {
+            if (!s_swapHdr)
+                return true;
+            if (s_hdrAverage.ready)
+                return true;
+            if (!s_hdrComposite.push)
+                return false;
+            DestroyHdrAverage();
+            if (!s_hdrComposite.state)
+                return false;
+            VkDescriptorSetLayoutBinding bindings[2] = {
+                { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            };
+            VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+            dslci.bindingCount = 2;
+            dslci.pBindings = bindings;
+            if (!Check(vkCreateDescriptorSetLayout(s_device, &dslci, nullptr, &s_hdrAverage.set), "HDR average set layout"))
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            plci.setLayoutCount = 1;
+            plci.pSetLayouts = &s_hdrAverage.set;
+            if (!Check(vkCreatePipelineLayout(s_device, &plci, nullptr, &s_hdrAverage.layout), "HDR average pipeline layout"))
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            s_hdrAverage.module = PostModule(kHdrAverageCs, 2);
+            if (!s_hdrAverage.module)
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+            cpci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT,
+                s_hdrAverage.module, "main", nullptr };
+            cpci.layout = s_hdrAverage.layout;
+            if (!Check(vkCreateComputePipelines(s_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &s_hdrAverage.pipeline),
+                    "HDR average pipeline"))
+            {
+                DestroyHdrAverage();
+                return false;
+            }
+            s_hdrAverage.ready = true;
+            fprintf(stderr, "[video] HDR: frame-average limiter ready\n");
+            return true;
+        }
+
+        // Inside the composite, once the scene is SHADER_READ_ONLY_OPTIMAL and
+        // before it's drawn: the average lands in the state buffer the
+        // composite reads in this same command buffer, so nothing waits for
+        // the host and nothing lags a frame.
+        void RecordHdrAverage(VkCommandBuffer cmd)
+        {
+            if (!s_swapHdr || !s_hdrAverage.ready)
+                return;
+            // The previous frame's composite read the state, and its average
+            // wrote it (earlier in submission order).
+            VkMemoryBarrier before{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+            VkDescriptorImageInfo scene{ s_hdrComposite.sampler, s_hdrTargets.sceneView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorBufferInfo state{ s_hdrComposite.state, 0, VK_WHOLE_SIZE };
+            VkWriteDescriptorSet writes[2] = {
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1,
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &scene, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &state, nullptr },
+            };
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hdrAverage.pipeline);
+            s_hdrComposite.push(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hdrAverage.layout, 0, 2, writes);
+            vkCmdDispatch(cmd, 1, 1, 1);
+            VkMemoryBarrier after{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+        }
+
+        // The GPU keeps the limiter's state (kHdrAverageCs, hdr::SmoothAverage);
+        // the host only looks at it, for the status line's peak and
+        // NFSMW_HDR_AVG_LOG. The other frame in flight may be writing it: a
+        // look, never an input.
+        void ReadHdrAverage()
+        {
+            if (!s_swapHdr || !s_hdrAverage.ready || !s_hdrComposite.stateMapped)
+                return;
+            s_hdrAverage.smoothed = std::clamp(s_hdrComposite.stateMapped[0], 0.0f, 1.0f);
+            static const bool logAverage = [] { const char* v = std::getenv("NFSMW_HDR_AVG_LOG"); return v && v[0] == '1'; }();
+            static uint64_t logged = 0;
+            if (logAverage && (logged++ % 30) == 0)
+                fprintf(stderr, "[video] HDR average %.3f, peak %.2f of %.2f\n", s_hdrAverage.smoothed, s_hdrPeak,
+                    s_hdrPeakBase);
+        }
+
+        // A scale pipeline (the plain one or the tone variant) for the
+        // swapchain's format; VK_NULL_HANDLE if it can't be made.
+        VkPipeline MakeScalePipeline(VkShaderModule fs, VkPipelineLayout layout, bool blend = false)
+        {
+            VkPipelineShaderStageCreateInfo stages[2] = {
+                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, s_post.vs, "main", nullptr },
+                { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr },
+            };
+            VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+            vp.viewportCount = 1;
+            vp.scissorCount = 1;
+            VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+            rs.polygonMode = VK_POLYGON_MODE_FILL;
+            rs.cullMode = VK_CULL_MODE_NONE;
+            rs.lineWidth = 1.0f;
+            VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineColorBlendAttachmentState att{};
+            att.colorWriteMask = 0xF;
+            if (blend)  // UI-C's pass: over the scale pass's picture by its alpha (the UI mask), the target's alpha kept
+            {
+                att.blendEnable = VK_TRUE;
+                att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                att.colorBlendOp = VK_BLEND_OP_ADD;
+                att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+                att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                att.alphaBlendOp = VK_BLEND_OP_ADD;
+            }
+            VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+            cb.attachmentCount = 1;
+            cb.pAttachments = &att;
+            VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            ds.dynamicStateCount = 2;
+            ds.pDynamicStates = dyn;
+            VkPipelineRenderingCreateInfoKHR rci{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
+            rci.colorAttachmentCount = 1;
+            const VkFormat targetFormat = TargetFormat();
+            rci.pColorAttachmentFormats = &targetFormat;
+            VkGraphicsPipelineCreateInfo gpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            gpci.pNext = &rci;
+            gpci.stageCount = 2;
+            gpci.pStages = stages;
+            gpci.pVertexInputState = &vi;
+            gpci.pInputAssemblyState = &ia;
+            gpci.pViewportState = &vp;
+            gpci.pRasterizationState = &rs;
+            gpci.pMultisampleState = &ms;
+            gpci.pColorBlendState = &cb;
+            gpci.pDynamicState = &ds;
             gpci.layout = layout;
             VkPipeline pipeline = VK_NULL_HANDLE;
             if (vkCreateGraphicsPipelines(s_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &pipeline) != VK_SUCCESS)
@@ -1643,17 +2564,17 @@ void main()
             return pipeline;
         }
 
-        // The scale pipeline for the swapchain's format (made again if it changes).
+        // The scale pipeline for the picture's target format (made again if it changes).
         bool EnsureScalePipeline()
         {
-            if (s_post.scale && s_post.scaleFormat == s_swapFormat)
+            if (s_post.scale && s_post.scaleFormat == TargetFormat())
                 return true;
             if (s_post.scale)
                 vkDestroyPipeline(s_device, s_post.scale, nullptr);
             s_post.scale = MakeScalePipeline(s_post.fs, s_post.scaleLayout);
             if (!s_post.scale)
                 return false;
-            s_post.scaleFormat = s_swapFormat;
+            s_post.scaleFormat = TargetFormat();
             return true;
         }
 
@@ -1837,7 +2758,7 @@ void main()
                     return false;
                 s_tone.ready = true;
             }
-            if (s_tone.pipeline && s_tone.format == s_swapFormat)
+            if (s_tone.pipeline && s_tone.format == TargetFormat())
                 return true;
             if (s_tone.pipeline)
                 vkDestroyPipeline(s_device, s_tone.pipeline, nullptr);
@@ -1849,7 +2770,7 @@ void main()
                 s_tone.ready = false;
                 return false;
             }
-            s_tone.format = s_swapFormat;
+            s_tone.format = TargetFormat();
             fprintf(stderr, "[video] tone: pipeline made in %.0f ms\n",
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
             return true;
@@ -1857,21 +2778,22 @@ void main()
 
         // Before the scale pass: whether this frame's picture goes through
         // the tone table (Settings > Display > Brightness, Xbox 360 Display
-        // Gamma), with the table brought up to date in `cmd` when its inputs
-        // changed. At Brightness 0 with the gamma off it does nothing and
-        // returns false.
+        // Gamma, Cooler Colors), with the table brought up to date in `cmd`
+        // when its inputs changed. At Brightness 0 with the gamma and Cooler
+        // Colors off it does nothing and returns false.
         bool PrepareTone(VkCommandBuffer cmd)
         {
             const int32_t brightness = std::clamp(settings::GetInt(settings::Id::Brightness), tone::kBrightnessMin, tone::kBrightnessMax);
             const bool useRamp = settings::GetBool(settings::Id::DisplayGamma);
-            if (tone::Neutral(brightness, useRamp) || !EnsureTone())
+            const bool coolerColors = settings::GetBool(settings::Id::CoolerColors);
+            if (tone::Neutral(brightness, useRamp, coolerColors) || !EnsureTone())
                 return false;
             const uint64_t rampGeneration = useRamp ? display_gamma::Generation() : 0;
-            if (s_tone.filled && s_tone.brightness == brightness && s_tone.ramp == useRamp && s_tone.rampGeneration == rampGeneration)
+            if (s_tone.filled && s_tone.brightness == brightness && s_tone.ramp == useRamp && s_tone.coolerColors == coolerColors && s_tone.rampGeneration == rampGeneration)
                 return true;
             display_gamma::Table ramp;
             const bool haveRamp = useRamp && display_gamma::Latest(ramp) != 0;
-            const tone::Lut lut = tone::BuildLut(brightness, haveRamp ? &ramp : nullptr);
+            const tone::Lut lut = tone::BuildLut(brightness, haveRamp ? &ramp : nullptr, coolerColors);
             const auto texels = tone::ToHalfTexels(lut);
             // The frames in flight may be reading the table: rare (a setting
             // or the game's own ramp changed), so wait for them.
@@ -1885,12 +2807,16 @@ void main()
             vkCmdCopyBufferToImage(cmd, s_tone.staging, s_tone.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             Barrier(cmd, s_tone.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            fprintf(stderr, "[video] tone: brightness %+d, Xbox 360 display gamma %s; 64->%.1f 128->%.1f 192->%.1f (8-bit levels, red)\n",
+            fprintf(stderr, "[video] tone: brightness %+d, Xbox 360 display gamma %s, cooler colors %s; 64->%.1f 128->%.1f 192->%.1f "
+                "(8-bit levels, red; blue %.1f %.1f %.1f)\n",
                 brightness, !useRamp ? "off" : haveRamp ? std::format("on (the game's ramp #{})", rampGeneration).c_str() : "on (no ramp from the game yet)",
-                lut.entry[64][0] * 255.0, lut.entry[128][0] * 255.0, lut.entry[192][0] * 255.0);
+                coolerColors ? "on" : "off",
+                lut.entry[64][0] * 255.0, lut.entry[128][0] * 255.0, lut.entry[192][0] * 255.0, lut.entry[64][2] * 255.0,
+                lut.entry[128][2] * 255.0, lut.entry[192][2] * 255.0);
             s_tone.filled = true;
             s_tone.brightness = brightness;
             s_tone.ramp = useRamp;
+            s_tone.coolerColors = coolerColors;
             s_tone.rampGeneration = rampGeneration;
             return true;
         }
@@ -2017,12 +2943,12 @@ void main()
             VkFormat& format = tone ? s_fsr.rcasToneFormat : s_fsr.rcasFormat;
             if (!fs)
                 return VK_NULL_HANDLE;
-            if (pipeline && format == s_swapFormat)
+            if (pipeline && format == TargetFormat())
                 return pipeline;
             if (pipeline)
                 vkDestroyPipeline(s_device, pipeline, nullptr);
             pipeline = MakeScalePipeline(fs, s_fsr.rcasLayout);
-            format = pipeline ? s_swapFormat : VK_FORMAT_UNDEFINED;
+            format = pipeline ? TargetFormat() : VK_FORMAT_UNDEFINED;
             return pipeline;
         }
 
@@ -2152,7 +3078,7 @@ void main()
                     uint32_t bicubic;
                     float band[4];
                     uint32_t bandOn;
-                } pc = { float(w), float(h), sharpen, pass == upscale::Pass::Bicubic ? 1u : 0u,
+                } pc = { float(w), float(h), sharpen, pass == upscale::Pass::Bicubic ? 1u : pass == upscale::Pass::Lanczos ? 2u : 0u,
                     { float(band.x0), float(band.x1), float(band.y0), float(band.y1) }, bandOn ? 1u : 0u };
                 static_assert(sizeof(pc) == 36);
                 vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
@@ -2163,14 +3089,178 @@ void main()
         // The pass a frame takes (video/upscale.h), FSR 1 only where its
         // pipelines are ready (made here the first time); a line in the log
         // when the pass or the sizes change.
-        upscale::Pass ChoosePass(bool tone, uint32_t w, uint32_t h, int32_t dw, int32_t dh, VkPipeline& rcas)
+        // UI-C (Sharper UI's presenter pass): the renderer's UI mask for the
+        // picture being shown (gpu/renderer.cpp, R8 at the frame's size; null:
+        // none), and the pass that draws EASU over the scale pass's picture
+        // where it is set (video/fsr1.cpp UiEasuGlsl). It applies with
+        // Sharper UI on (NFSMW_UI_MASK=0: off), to a picture the bicubic pass
+        // enlarges by a non-integer factor (2x2's 2560x1440 at 4K: x1.5),
+        // without HDR; under Hor+/Vert+ its EASU keeps each tap in the pixel's
+        // span of the band's three, as the scale pass does (no seam at the
+        // band's edge). Elsewhere the picture is as before.
+        // NFSMW_UI_MASK_SHOW=1 paints the mask red instead.
+        VkImageView s_pendingUiMask = VK_NULL_HANDLE, s_frameUiMask = VK_NULL_HANDLE;
+        uint64_t s_pendingUiMaskSeq = 0;
+        struct UiPassState
+        {
+            bool tried = false, ready = false;
+            VkDescriptorSetLayout set = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkShaderModule fs = VK_NULL_HANDLE, toneFs = VK_NULL_HANDLE;
+            VkPipeline plain = VK_NULL_HANDLE, tone = VK_NULL_HANDLE;
+            VkFormat format = VK_FORMAT_UNDEFINED;
+        } s_ui;
+        struct UiPush
+        {
+            uint32_t con[16];
+            int32_t band[4];
+            int32_t origin[2], outSize[2], srcSize[2];
+            uint32_t show, bandOn;
+        };
+        static_assert(sizeof(UiPush) == 112);
+
+        bool UiMaskOn()
+        {
+            static const bool env = [] { const char* v = std::getenv("NFSMW_UI_MASK"); return !(v && v[0] == '0'); }();
+            return env && settings::GetBool(settings::Id::SharpUi);
+        }
+
+        // The pass's pipeline (plain, or through the tone table), made the first time.
+        VkPipeline UiPassPipeline(bool tone)
+        {
+            if (!s_ui.tried)
+            {
+                s_ui.tried = true;
+                VkDescriptorSetLayoutBinding bindings[3] = {
+                    { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                };
+                VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+                dslci.bindingCount = 3;
+                dslci.pBindings = bindings;
+                VkPushConstantRange range{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush) };
+                VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+                plci.setLayoutCount = 1;
+                plci.pSetLayouts = &s_ui.set;
+                plci.pushConstantRangeCount = 1;
+                plci.pPushConstantRanges = &range;
+                const std::string glsl = fsr1::UiEasuGlsl();
+                const std::string toneGlsl = ToneVariant(glsl.c_str());
+                s_ui.ready = Check(vkCreateDescriptorSetLayout(s_device, &dslci, nullptr, &s_ui.set), "UI pass set layout") &&
+                    Check(vkCreatePipelineLayout(s_device, &plci, nullptr, &s_ui.layout), "UI pass layout") &&
+                    (s_ui.fs = PostModule(glsl.c_str(), 1)) && !toneGlsl.empty() && (s_ui.toneFs = PostModule(toneGlsl.c_str(), 1));
+                fprintf(stderr, "[video] UI pass (Sharper UI, EASU over the UI mask): %s\n", s_ui.ready ? "ready" : "unavailable");
+            }
+            if (!s_ui.ready)
+                return VK_NULL_HANDLE;
+            if (s_ui.format != TargetFormat())
+            {
+                // (A new format: the old pipelines may be in flight; kept. Rare.)
+                s_ui.format = TargetFormat();
+                s_ui.plain = MakeScalePipeline(s_ui.fs, s_ui.layout, true);
+                s_ui.tone = MakeScalePipeline(s_ui.toneFs, s_ui.layout, true);
+            }
+            return tone ? s_ui.tone : s_ui.plain;
+        }
+
+        // Whether the pass applies to this picture.
+        bool UiPassApplies(VkImageView mask, upscale::Pass pass, bool /*bandOn: followed (the pass keeps its spans)*/, uint32_t w, uint32_t h,
+            int32_t dw, int32_t dh)
+        {
+            if (!mask || !UiMaskOn() || pass != upscale::Pass::Bicubic || s_swapHdr || !upscale::Enlarged(w, h, dw, dh))
+                return false;
+            return uint32_t(dw) % w != 0 || uint32_t(dh) % h != 0;  // an integer enlargement keeps texels whole: as before
+        }
+
+        // Inside the picture's rendering pass, after DrawPicture.
+        void DrawUiPass(VkCommandBuffer cmd, bool tone, VkImageView src, VkImageView mask, uint32_t w, uint32_t h, int32_t dx, int32_t dy,
+            int32_t dw, int32_t dh, const video::FrameBand& band, bool bandOn)
+        {
+            VkPipeline pipeline = UiPassPipeline(tone);
+            if (!pipeline)
+                return;
+            VkViewport viewport{ float(dx), float(dy), float(dw), float(dh), 0.0f, 1.0f };
+            VkRect2D scissor{ { dx, dy }, { uint32_t(dw), uint32_t(dh) } };
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            VkDescriptorImageInfo in{ s_post.sampler, src, VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo table{ s_post.sampler, tone ? s_tone.view : src, tone ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL };
+            VkDescriptorImageInfo weights{ s_post.sampler, mask, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet writes[3] = {
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &in, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &table, nullptr, nullptr },
+                { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, 2, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &weights, nullptr, nullptr },
+            };
+            s_post.pushDescriptorSet(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_ui.layout, 0, 3, writes);
+            static const bool show = [] { const char* v = std::getenv("NFSMW_UI_MASK_SHOW"); return v && v[0] == '1'; }();
+            UiPush pc{};
+            const std::array<uint32_t, 16> con = fsr1::EasuConstants(w, h, uint32_t(dw), uint32_t(dh));
+            std::copy(con.begin(), con.end(), pc.con);
+            pc.origin[0] = dx;
+            pc.origin[1] = dy;
+            pc.outSize[0] = dw;
+            pc.outSize[1] = dh;
+            pc.srcSize[0] = int32_t(w);
+            pc.srcSize[1] = int32_t(h);
+            pc.show = show ? 1u : 0u;
+            pc.band[0] = band.x0;
+            pc.band[1] = band.x1;
+            pc.band[2] = band.y0;
+            pc.band[3] = band.y1;
+            // NFSMW_UI_BAND_SPANS=0 (a diagnostic, the banded pass's cost): its
+            // taps ignore the band (gathers only; band-edge pixels then differ).
+            static const bool spans = [] { const char* v = std::getenv("NFSMW_UI_BAND_SPANS"); return !(v && v[0] == '0'); }();
+            pc.bandOn = bandOn && spans ? 1u : 0u;
+            vkCmdPushConstants(cmd, s_ui.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+
+        // Movie Upscaling (video/upscale.h ChooseWithMovie): while a movie
+        // plays at 1x, its Sharper pass, with `sharpen` its RCAS strength
+        // (kMovieRcas); otherwise Sharpening.
+        upscale::Pass ChoosePass(bool tone, uint32_t w, uint32_t h, int32_t dw, int32_t dh, VkPipeline& rcas, uint32_t aspectW,
+            uint32_t aspectH, float& sharpen)
         {
             rcas = VK_NULL_HANDLE;
-            upscale::Pass pass = upscale::Choose(settings::GetInt(settings::Id::Scaling), w, h, dw, dh);
+            sharpen = Sharpen();
+            const int32_t movieMode = settings::GetInt(settings::Id::MovieUpscaling);
+            const bool movie = upscale::MoviePlaying(game::LastMovieFrameNs(), NowNs());
+            const upscale::Pass plain = upscale::Choose(settings::GetInt(settings::Id::Scaling), w, h, dw, dh);
+            upscale::Pass pass = upscale::ChooseWithMovie(settings::GetInt(settings::Id::Scaling), movieMode, movie,
+                upscale::AtOneX(w, h, aspectW, aspectH), upscale::kFsr1Offered, w, h, dw, dh);
+            const bool moviePass = pass != plain;
+            if (moviePass && pass == upscale::Pass::Fsr1)
+                sharpen = upscale::kMovieRcas;
             if (pass == upscale::Pass::Fsr1 && EnsureFsr())
                 rcas = RcasPipeline(tone);
             if (pass == upscale::Pass::Fsr1 && !rcas)
-                pass = upscale::Pass::Bicubic;
+                pass = moviePass ? upscale::Pass::Lanczos : upscale::Pass::Bicubic;
+            static int whyLines = 0;
+            if (movie && !moviePass && movieMode == int32_t(upscale::MovieMode::Sharper) && whyLines < 8)
+            {
+                static std::string lastWhy;
+                const std::string why = std::format("a movie frame {}x{} (frame {}x{}) shown at {}x{}: {}", w, h, aspectW, aspectH, dw, dh,
+                    !upscale::AtOneX(w, h, aspectW, aspectH) ? "not at 1x" : !upscale::Enlarged(w, h, dw, dh) ? "not enlarged" : "?");
+                if (why != lastWhy)
+                {
+                    whyLines++;
+                    lastWhy = why;
+                    fprintf(stderr, "[video] movie upscaling: %s; the Upscaling setting's pass\n", why.c_str());
+                }
+            }
+            static bool lastMovie = false;
+            if (moviePass != lastMovie)
+            {
+                lastMovie = moviePass;
+                static int movieLines = 0;
+                if (movieLines++ < 64)
+                    fprintf(stderr, "[video] movie upscaling: %s\n", moviePass ? std::format("{} ({}x{} -> {}x{}{})", upscale::PassName(pass), w, h,
+                        dw, dh, pass == upscale::Pass::Fsr1 ? std::format(", RCAS at {:.2f}", sharpen) : std::string()).c_str()
+                        : "the movie ended or isn't enlarged at 1x: the Upscaling setting's pass");
+            }
             static upscale::Pass lastPass = upscale::Pass::Linear;
             static uint32_t lastW = 0, lastH = 0;
             static int32_t lastDw = 0, lastDh = 0;
@@ -2180,7 +3270,7 @@ void main()
                 lines++;
                 const bool fsrChosen = settings::GetInt(settings::Id::Scaling) == int32_t(settings::ScalingMode::Fsr1);
                 fprintf(stderr, "[video] upscaling: %s, %ux%u -> %dx%d%s\n", upscale::PassName(pass), w, h, dw, dh,
-                    pass == upscale::Pass::Fsr1 ? std::format(" (RCAS at {:.2f} of its strength)", upscale::RcasAmount(Sharpen())).c_str()
+                    pass == upscale::Pass::Fsr1 ? std::format(" (RCAS at {:.2f} of its strength)", upscale::RcasAmount(sharpen)).c_str()
                     : !fsrChosen ? ""
                     : upscale::Enlarged(w, h, dw, dh) ? " (FSR 1 unavailable)" : " (FSR 1 only enlarges)");
             }
@@ -2198,7 +3288,9 @@ void main()
         // format, without the UI), saved as
         // build/present_check_<k>_<name>.ppm: side-by-sides of one frame.
         // Passes: bicubic, linear, fsr1, each at Sharpening or with
-        // :<sharpening> (fsr1:0 is EASU alone). fsr1 where the frame isn't
+        // :<sharpening> (fsr1:0 is EASU alone), and lanczos (Movie
+        // Upscaling's pass where FSR 1 isn't offered; bicubic where the frame
+        // isn't enlarged), uic (bicubic, then UI-C's pass where it applies). fsr1 where the frame isn't
         // enlarged draws bicubic, as the setting does. "source": the frame
         // the passes start from (after the anti-aliasing), at its own size
         // (through the tone table when that is in use).
@@ -2208,6 +3300,9 @@ void main()
             int32_t mode;
             float sharpen;  // < 0: Sharpening's
             bool source = false;
+            bool lanczos = false;  // Movie Upscaling's Lanczos pass (enlarging; else bicubic)
+            bool ui = false;       // "uic": bicubic, then UI-C's pass where it applies (the frame's UI mask)
+            bool uiAfterAa = false;  // "uica" (a diagnostic): the same, its EASU from the anti-aliased frame instead
         };
         const std::vector<CompareEntry>& CompareList()
         {
@@ -2223,15 +3318,15 @@ void main()
                     std::string kind = item.substr(0, item.find(':'));
                     float sharpen = item.find(':') == std::string::npos ? -1.0f : std::strtof(item.c_str() + item.find(':') + 1, nullptr);
                     int32_t mode = kind == "fsr1" ? int32_t(upscale::Mode::Fsr1) : kind == "linear" || kind == "source" ? int32_t(upscale::Mode::Linear)
-                        : kind == "bicubic" ? int32_t(upscale::Mode::Bicubic) : -1;
+                        : kind == "bicubic" || kind == "lanczos" || kind == "uic" || kind == "uica" ? int32_t(upscale::Mode::Bicubic) : -1;
                     if (mode < 0)
                     {
-                        fprintf(stderr, "[video] NFSMW_UPSCALE_COMPARE: \"%s\" isn't bicubic, linear, fsr1[:<sharpening>] or source\n", item.c_str());
+                        fprintf(stderr, "[video] NFSMW_UPSCALE_COMPARE: \"%s\" isn't bicubic, linear, lanczos, fsr1[:<sharpening>] or source\n", item.c_str());
                         continue;
                     }
                     std::string name = item;
                     std::replace(name.begin(), name.end(), ':', '-');
-                    entries.push_back({ name, mode, sharpen, kind == "source" });
+                    entries.push_back({ name, mode, sharpen, kind == "source", kind == "lanczos", kind == "uic" || kind == "uica", kind == "uica" });
                 }
                 return entries;
             }();
@@ -2252,7 +3347,7 @@ void main()
         // Records each listed pass's picture of this frame and its copy to
         // the host. Outside a rendering pass.
         std::vector<CompareShot> RecordCompare(VkCommandBuffer cmd, bool tone, VkImageView scaleInput, uint32_t w, uint32_t h,
-            const video::FrameBand& band, bool bandOn, int32_t dx, int32_t dy, int32_t dw, int32_t dh)
+            const video::FrameBand& band, bool bandOn, int32_t dx, int32_t dy, int32_t dw, int32_t dh, VkImageView preAa = VK_NULL_HANDLE)
         {
             std::vector<CompareShot> shots;
             for (const CompareEntry& entry : CompareList())
@@ -2264,9 +3359,10 @@ void main()
                 shot.height = entry.source ? h : s_swapExtent.height;
                 const int32_t x = entry.source ? 0 : dx, y = entry.source ? 0 : dy;
                 const int32_t width = entry.source ? int32_t(w) : dw, height = entry.source ? int32_t(h) : dh;
+                const VkFormat shotFormat = TargetFormat();
                 VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
                 ii.imageType = VK_IMAGE_TYPE_2D;
-                ii.format = s_swapFormat;
+                ii.format = shotFormat;
                 ii.extent = { shot.width, shot.height, 1 };
                 ii.mipLevels = 1;
                 ii.arrayLayers = 1;
@@ -2285,7 +3381,7 @@ void main()
                 VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
                 vci.image = shot.image;
                 vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-                vci.format = s_swapFormat;
+                vci.format = shotFormat;
                 vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
                 vkCreateImageView(s_device, &vci, nullptr, &shot.view);
                 VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
@@ -2300,6 +3396,8 @@ void main()
 
                 VkPipeline rcas = VK_NULL_HANDLE;
                 upscale::Pass pass = upscale::Choose(entry.mode, w, h, width, height);
+                if (entry.lanczos && upscale::Enlarged(w, h, width, height))
+                    pass = upscale::Pass::Lanczos;
                 if (pass == upscale::Pass::Fsr1 && EnsureFsr())
                     rcas = RcasPipeline(tone);
                 if (pass == upscale::Pass::Fsr1 && !rcas)
@@ -2321,6 +3419,8 @@ void main()
                 s_context.cmdBeginRendering(cmd, &ri);
                 DrawPicture(cmd, pass, rcas, tone, scaleInput, w, h, band, bandOn, x, y, width, height,
                     entry.sharpen >= 0.0f ? std::min(entry.sharpen, 1.0f) : Sharpen());
+                if (entry.ui && preAa && UiPassApplies(s_frameUiMask, pass, bandOn, w, h, width, height))
+                    DrawUiPass(cmd, tone, entry.uiAfterAa ? scaleInput : preAa, s_frameUiMask, w, h, x, y, width, height, band, bandOn);
                 s_context.cmdEndRendering(cmd);
                 Barrier(cmd, shot.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2359,6 +3459,7 @@ void main()
             void* mapped = nullptr;
             uint32_t w = 0, h = 0;  // the scaled picture
             uint32_t srcW = 0, srcH = 0;
+            VkFormat format = VK_FORMAT_UNDEFINED;
             bool pending = false;
             uint64_t present = 0;
             float between = 0.0f;
@@ -2379,7 +3480,7 @@ void main()
             const uint32_t w = s_swapExtent.width / kCoverCheckDiv, h = s_swapExtent.height / kCoverCheckDiv;
             if (w < 16 || h < 16)
                 return;
-            if (c.w != w || c.h != h)
+            if (c.w != w || c.h != h || c.format != TargetFormat())
             {
                 vkDeviceWaitIdle(s_device);
                 if (c.buffer)
@@ -2393,9 +3494,10 @@ void main()
                 c = CoverCheck{};
                 c.w = w;
                 c.h = h;
+                c.format = TargetFormat();
                 VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
                 ici.imageType = VK_IMAGE_TYPE_2D;
-                ici.format = s_swapFormat;
+                ici.format = c.format;
                 ici.extent = { w, h, 1 };
                 ici.mipLevels = ici.arrayLayers = 1;
                 ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2462,7 +3564,7 @@ void main()
             if (!c.pending)
                 return;
             c.pending = false;
-            const bool bgr = s_swapFormat == VK_FORMAT_B8G8R8A8_UNORM || s_swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
+            const bool bgr = c.format == VK_FORMAT_B8G8R8A8_UNORM || c.format == VK_FORMAT_B8G8R8A8_SRGB;
             static std::vector<uint8_t> luma;
             luma.resize(size_t(c.w) * c.h);
             const uint8_t* px = static_cast<const uint8_t*>(c.mapped);
@@ -2497,7 +3599,8 @@ void main()
 
         void SaveCompare(std::vector<CompareShot>& shots, int captureIndex)
         {
-            const bool bgr = s_swapFormat == VK_FORMAT_B8G8R8A8_UNORM || s_swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
+            const VkFormat format = TargetFormat();
+            const bool bgr = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
             for (CompareShot& shot : shots)
             {
                 void* mapped = nullptr;
@@ -2566,6 +3669,26 @@ void main()
                 s_vsync = vsync;
                 rebuild = true;
             }
+            const bool hdr = kHdrOffered && !(s_edrUnavailable && s_pqUnavailable) && settings::GetBool(settings::Id::Hdr);
+            const int32_t hdrFormat = settings::GetInt(settings::Id::HdrFormat);
+            if (hdr != s_hdrSetting || (hdr && hdrFormat != s_hdrFormat))
+            {
+                s_hdrSetting = hdr;
+                s_hdrFormat = hdrFormat;
+                rebuild = true;
+            }
+            const int32_t hdrStrength = std::clamp(settings::GetInt(settings::Id::HdrStrength), 2, 4);
+            const float paperWhite = PaperWhiteSetting();
+            if (hdrStrength != s_hdrStrength || paperWhite != s_hdrPaperWhite)
+            {
+                s_hdrStrength = hdrStrength;
+                s_hdrPaperWhite = paperWhite;
+                if (s_swapPq && s_setHdrMetadata && s_swapchain)
+                {
+                    const VkHdrMetadataEXT metadata = Hdr10Metadata(float(s_hdrStrength) * s_hdrPaperWhite, s_hdrPaperWhite);
+                    s_setHdrMetadata(s_device, 1, &s_swapchain, &metadata);
+                }
+            }
 #if defined(__APPLE__) && TARGET_OS_IOS
             // Screen Resolution: CreateSwapchain sets the view's scale first.
             if (float scale = WantedPresentScale(); scale != s_presentScale)
@@ -2579,7 +3702,7 @@ void main()
             {
                 WaitIdle();
                 DestroySwapchain();
-                s_swapReason = "V-Sync or Screen Resolution";
+                s_swapReason = "V-Sync, HDR or Screen Resolution";
                 CreateSwapchain();
                 s_swapReason = nullptr;
             }
@@ -2854,6 +3977,10 @@ void main()
         s_gameMode = DetectGameMode();
         const bool startFullscreen = s_fullscreen.Launch(settings::GetBool(settings::Id::Fullscreen), FullscreenLocked());
         s_vsync = settings::GetBool(settings::Id::VSync);
+        s_hdrSetting = kHdrOffered && settings::GetBool(settings::Id::Hdr);
+        s_hdrFormat = settings::GetInt(settings::Id::HdrFormat);
+        s_hdrStrength = std::clamp(settings::GetInt(settings::Id::HdrStrength), 2, 4);
+        s_hdrPaperWhite = PaperWhiteSetting();
 #if defined(__APPLE__) && TARGET_OS_IOS
         // Always fullscreen there (FullscreenLocked), which hides the status
         // bar over the picture. SDL then also defers every screen edge's
@@ -2897,6 +4024,14 @@ void main()
             portability |= strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
         if (portability)
             exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        if (kHdrOffered)
+            for (const VkExtensionProperties& e : instanceExts)
+                if (strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0)
+                {
+                    if (std::find(exts.begin(), exts.end(), VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == exts.end())
+                        exts.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+                    s_swapchainColorspaceExt = true;
+                }
 
         VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
         app.pApplicationName = "SpeedBreaker";
@@ -2953,6 +4088,7 @@ void main()
         vkEnumerateDeviceExtensionProperties(s_physical, nullptr, &extAvail, avail.data());
         bool presentId = false, presentWait = false, hostImport = false, shadingRate = false, displayTiming = false;
         bool pciBusInfo = false;  // (a property query only: not enabled)
+        bool hdrMetadata = false;
         for (auto& e : avail)
         {
             pciBusInfo |= strcmp(e.extensionName, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME) == 0;
@@ -2963,7 +4099,11 @@ void main()
             shadingRate |= strcmp(e.extensionName, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) == 0;
             presentId |= strcmp(e.extensionName, VK_KHR_PRESENT_ID_EXTENSION_NAME) == 0;
             presentWait |= strcmp(e.extensionName, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) == 0;
+            hdrMetadata |= kHdrOffered && strcmp(e.extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME) == 0;
         }
+        s_hdrMetadataExt = hdrMetadata;
+        if (hdrMetadata)
+            devExts.push_back(VK_EXT_HDR_METADATA_EXTENSION_NAME);
         // Present timing (the guest vblank lock), where the device has it.
         // NFSMW_PRESENT_TIMING=0 leaves it off, should a driver object to the
         // waits beside presents: no lock, and no repeat counts.
@@ -3109,6 +4249,10 @@ void main()
         if (!Check(vkCreateDevice(s_physical, &dci, nullptr, &s_device), "vkCreateDevice"))
             return false;
         vkGetDeviceQueue(s_device, s_queueFamily, 0, &s_queue);
+        if (s_hdrMetadataExt)
+            s_setHdrMetadata = reinterpret_cast<PFN_vkSetHdrMetadataEXT>(vkGetDeviceProcAddr(s_device, "vkSetHdrMetadataEXT"));
+        if (!s_setHdrMetadata)
+            s_hdrMetadataExt = false;
         if (s_presentTiming)
             s_waitForPresent = (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(s_device, "vkWaitForPresentKHR");
         s_presentTiming = s_waitForPresent != nullptr;
@@ -3261,7 +4405,7 @@ void main()
                     "Properties > General > Game Resolution to Native in Steam.", mode->w, mode->h, nativeW, nativeH);
         }
         s_uiReady = ui::Initialize(s_window, { s_instance, s_physical, s_device, s_queueFamily, s_queue, &s_queueMutex,
-            VK_API_VERSION_1_2, s_swapFormat });
+            VK_API_VERSION_1_2, TargetFormat() });
         if (!s_resolutionHint.empty())
         {
             fprintf(stderr, "[video] %s\n", s_resolutionHint.c_str());
@@ -4010,7 +5154,6 @@ void main()
             SDL_Delay(16);
             return true;
         }
-
         // Held until the frame that uses the renderer's image is submitted
         // (ReleaseFrontImage waits for it before that image is destroyed).
         std::unique_lock frontLock(s_frontUseMutex);
@@ -4037,6 +5180,8 @@ void main()
                 h = s_betweenHeight;
                 aspectW = s_betweenAspectW;
                 aspectH = s_betweenAspectH;
+                s_lastSeq = s_betweenSeq;
+                s_frameUiMask = VK_NULL_HANDLE;  // (an in-between picture: no UI mask)
                 s_betweenNew = false;
                 frameVblank = s_betweenVblank;
                 frameBetween = s_betweenT;
@@ -4051,6 +5196,8 @@ void main()
                 h = s_pendingHeight;
                 aspectW = s_pendingAspectW;
                 aspectH = s_pendingAspectH;
+                s_lastSeq = s_pendingSeq;
+                s_frameUiMask = s_pendingUiMaskSeq == s_pendingSeq ? s_pendingUiMask : VK_NULL_HANDLE;  // (UI-C)
                 s_pendingNew = false;
                 frameVblank = s_pendingVblank;
                 frameShift = s_pendingShift;
@@ -4114,7 +5261,7 @@ void main()
             std::lock_guard lock(s_captureMutex);
             captures.swap(s_captureRequests);
         }
-        if (!captures.empty() && !(haveSource && s_swapReadable))
+        if (!captures.empty() && !(haveSource && (s_swapReadable || s_swapHdr)))
         {
             for (auto& promise : captures)
                 promise.set_value({});
@@ -4124,6 +5271,38 @@ void main()
 
         Frame& f = s_frames[s_frameIndex];
         vkWaitForFences(s_device, 1, &f.inFlight, VK_TRUE, UINT64_MAX);
+        ReadHdrAverage();
+        if (s_swapHdr)
+        {
+            // The current headroom follows the brightness slider and rises
+            // once EDR content is up; the composite's push constant takes it
+            // every frame, after the frame-average limiter.
+            if (s_swapPq)
+            {
+                s_hdrPeakBase = float(s_hdrStrength);
+                s_hdrStatus = std::format("HDR10 (PQ), up to {:.0f} nits", float(s_hdrStrength) * s_hdrPaperWhite);
+            }
+            else
+            {
+#if defined(__APPLE__) && !TARGET_OS_IOS
+                s_hdrHeadroom = platform::macos::DisplayHeadroom(s_window);
+#endif
+                // Logged when it moves by 0.1 or more (the brightness slider,
+                // EDR ramping up, another display), so a bug report says what
+                // headroom the picture actually had: macOS gives less of it
+                // the brighter the screen is set.
+                static float loggedHeadroom = 0.0f;
+                if (std::fabs(s_hdrHeadroom - loggedHeadroom) >= 0.1f)
+                {
+                    fprintf(stderr, "[video] EDR headroom %.2f (peak %.2fx of HDR Strength %dx)\n", s_hdrHeadroom,
+                        std::min(hdr::PeakForHeadroom(s_hdrHeadroom), float(s_hdrStrength)), s_hdrStrength);
+                    loggedHeadroom = s_hdrHeadroom;
+                }
+                s_hdrPeakBase = std::min(hdr::PeakForHeadroom(s_hdrHeadroom), float(s_hdrStrength));
+                s_hdrStatus = std::format("Extended Linear (EDR), up to {:.2f}x (headroom {:.2f})", s_hdrPeakBase, s_hdrHeadroom);
+            }
+            s_hdrPeak = hdr::FramePeak(s_hdrPeakBase, s_hdrAverage.smoothed);
+        }
         if (game::covers::Enabled())
             CoverCheckHarvest(s_frameIndex);
         if (f.timed)
@@ -4141,10 +5320,10 @@ void main()
                     s_abFrames[k]++;
                     s_abNs[k] += uint64_t(double(ts[2] - ts[0]) * s_timestampPeriod);
                     s_abAaNs[k] += uint64_t(double(ts[1] - ts[0]) * s_timestampPeriod);
-                    if ((s_abFrames[0] + s_abFrames[1] + s_abFrames[2]) % 600 == 0)
+                    if ((s_abFrames[0] + s_abFrames[1] + s_abFrames[2] + s_abFrames[3]) % 600 == 0)
                     {
                         std::string text;
-                        for (upscale::Pass pass : { upscale::Pass::Bicubic, upscale::Pass::Fsr1, upscale::Pass::Linear })
+                        for (upscale::Pass pass : { upscale::Pass::Bicubic, upscale::Pass::Fsr1, upscale::Pass::Lanczos, upscale::Pass::Linear })
                         {
                             const int i = int(pass);
                             if (s_abFrames[i])
@@ -4226,7 +5405,8 @@ void main()
             }
         }
 
-        VkImage dst = s_swapImages[imageIndex];
+        VkImage dst = s_swapHdr ? s_hdrTargets.scene : s_swapImages[imageIndex];
+        VkImageView dstView = s_swapHdr ? s_hdrTargets.sceneView : s_swapViews[imageIndex];
         VkBuffer captureBuffer = VK_NULL_HANDLE;
         VkDeviceMemory captureMemory = VK_NULL_HANDLE;
         VkDeviceSize captureSize = 0;
@@ -4353,24 +5533,28 @@ void main()
                     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_timestamps, s_frameIndex * 3 + 1);
             }
 
-            // Brightness and the 360's display gamma: false at Brightness 0
-            // with the gamma off, and then the scale pass below is exactly as
-            // before.
+            // Brightness, the 360's display gamma and Cooler Colors: false at
+            // Brightness 0 with the gamma and Cooler Colors off, and then the
+            // scale pass below is exactly as before.
             const bool tone = scaleInput && PrepareTone(cmd);
             // The pass that draws the picture (video/upscale.h): FSR 1's
             // EASU first, outside the swapchain image's pass.
             VkPipeline rcas = VK_NULL_HANDLE;
-            upscale::Pass pass = scaleInput ? ChoosePass(tone, w, h, dw, dh, rcas) : upscale::Pass::Bicubic;
+            float passSharpen = Sharpen();
+            upscale::Pass pass = scaleInput ? ChoosePass(tone, w, h, dw, dh, rcas, aspectW, aspectH, passSharpen) : upscale::Pass::Bicubic;
             static uint64_t abCount = 0;
-            if (s_upscaleAb && pass == upscale::Pass::Fsr1 && (abCount++ & 1))
+            if (s_upscaleAb && (pass == upscale::Pass::Fsr1 || pass == upscale::Pass::Lanczos) && (abCount++ & 1))
+            {
                 pass = upscale::Pass::Bicubic;
+                passSharpen = Sharpen();
+            }
             f.pass = pass;
             if (scaleInput && pass == upscale::Pass::Fsr1)
                 RecordEasu(cmd, scaleInput, w, h, dw, dh, band, bandOn);
             Barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
             VkRenderingAttachmentInfoKHR color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
-            color.imageView = s_swapViews[imageIndex];
+            color.imageView = dstView;
             color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // black bars
             color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -4382,22 +5566,31 @@ void main()
             ri.colorAttachmentCount = 1;
             ri.pColorAttachments = &color;
             s_context.cmdBeginRendering(cmd, &ri);
+            bool scenePassOpen = true;
             if (scaleInput)
             {
-                DrawPicture(cmd, pass, rcas, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh, Sharpen());
+                DrawPicture(cmd, pass, rcas, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh, passSharpen);
+                if (UiPassApplies(s_frameUiMask, pass, bandOn, w, h, dw, dh))
+                    DrawUiPass(cmd, tone, f.sourceView, s_frameUiMask, w, h, dx, dy, dw, dh, band, bandOn);
                 if (!captures.empty() && pictureRect.extent.width)
                 {
                     // The game's picture alone: pause the pass, copy it out,
-                    // and carry on with the UI over it.
+                    // and (SDR) carry on with the UI over it. HDR composites
+                    // the UI in its own pass below.
                     s_context.cmdEndRendering(cmd);
-                    gameCapture = RecordRegionCapture(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    scenePassOpen = false;
+                    gameCapture = RecordRegionCapture(cmd, dst, TargetFormat(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, pictureRect);
-                    VkRenderingAttachmentInfoKHR resume = color;
-                    resume.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-                    VkRenderingInfoKHR again = ri;
-                    again.pColorAttachments = &resume;
-                    s_context.cmdBeginRendering(cmd, &again);
+                    if (!s_swapHdr)
+                    {
+                        VkRenderingAttachmentInfoKHR resume = color;
+                        resume.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                        VkRenderingInfoKHR again = ri;
+                        again.pColorAttachments = &resume;
+                        s_context.cmdBeginRendering(cmd, &again);
+                        scenePassOpen = true;
+                    }
                 }
             }
             // NFSMW_LOG_COVERS=1: the picture as drawn, before the UI (the
@@ -4405,17 +5598,55 @@ void main()
             // inside it (CoverCheckRecord, read back a frame later).
             if (game::covers::Enabled() && haveSource)
             {
-                s_context.cmdEndRendering(cmd);
+                if (s_swapHdr)
+                {
+                    if (scenePassOpen)
+                        s_context.cmdEndRendering(cmd);
+                    scenePassOpen = false;
+                }
+                else
+                    s_context.cmdEndRendering(cmd);
                 CoverCheckRecord(cmd, dst, s_frameIndex, 0.0f);
-                VkRenderingAttachmentInfoKHR resume = color;
-                resume.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-                VkRenderingInfoKHR again = ri;
-                again.pColorAttachments = &resume;
-                s_context.cmdBeginRendering(cmd, &again);
+                if (!s_swapHdr)
+                {
+                    VkRenderingAttachmentInfoKHR resume = color;
+                    resume.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                    VkRenderingInfoKHR again = ri;
+                    again.pColorAttachments = &resume;
+                    s_context.cmdBeginRendering(cmd, &again);
+                    scenePassOpen = true;
+                }
             }
-            if (uiFrame)
-                ui::Draw(cmd);
-            s_context.cmdEndRendering(cmd);
+            if (s_swapHdr)
+            {
+                if (scenePassOpen)
+                    s_context.cmdEndRendering(cmd);
+                Barrier(cmd, s_hdrTargets.ui, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                VkRenderingAttachmentInfoKHR uiColor{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+                uiColor.imageView = s_hdrTargets.uiView;
+                uiColor.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                uiColor.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                uiColor.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                uiColor.clearValue.color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+                VkRenderingInfoKHR uiRi{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+                uiRi.renderArea = { { 0, 0 }, s_swapExtent };
+                uiRi.layerCount = 1;
+                uiRi.colorAttachmentCount = 1;
+                uiRi.pColorAttachments = &uiColor;
+                s_context.cmdBeginRendering(cmd, &uiRi);
+                if (uiFrame)
+                    ui::Draw(cmd);
+                s_context.cmdEndRendering(cmd);
+                RecordHdrComposite(cmd, s_swapImages[imageIndex], s_swapViews[imageIndex]);
+                dst = s_swapImages[imageIndex];
+            }
+            else
+            {
+                if (uiFrame)
+                    ui::Draw(cmd);
+                s_context.cmdEndRendering(cmd);
+            }
             if (f.timed)
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_timestamps, s_frameIndex * 3 + 2);
             // NFSMW_CHECK_PRESENT_SEC=<s>: from s seconds after the first
@@ -4447,8 +5678,29 @@ void main()
                 return !v ? 0 : std::strcmp(v, "between") == 0 ? 1 : std::strcmp(v, "real") == 0 ? 2 : 0;
             }();
             const bool kindOk = checkKind == 0 || (checkKind == 1 ? frameBetween != 0.0f : frameBetween == 0.0f && s_lastFreshImage);
-            bool check = kindOk && (checkTimes.size() == 1 ? taken < 3 && presents % 30 == 0 && sinceLaunch >= checkTimes[0]
-                                                           : size_t(taken) < checkTimes.size() && sinceLaunch >= checkTimes[taken]);
+            // NFSMW_CHECK_MOVIE_FRAMES=<n,...> (instead of the times): the
+            // first fresh picture once the XMV player has rendered n frames,
+            // so two runs capture the same movie frame (Movie Upscaling's A/B).
+            static const std::vector<uint64_t> checkMovie = [] {
+                std::vector<uint64_t> frames;
+                if (const char* v = std::getenv("NFSMW_CHECK_MOVIE_FRAMES"))
+                    for (const char* p = v; *p;)
+                    {
+                        frames.push_back(std::strtoull(p, nullptr, 10));
+                        p = strchr(p, ',');
+                        if (!p)
+                            break;
+                        p++;
+                    }
+                return frames;
+            }();
+            bool check = !checkMovie.empty()
+                ? s_lastFreshImage && size_t(taken) < checkMovie.size() && game::MovieFramesRendered() >= checkMovie[taken]
+                : kindOk && (checkTimes.size() == 1 ? taken < 3 && presents % 30 == 0 && sinceLaunch >= checkTimes[0]
+                                                    : size_t(taken) < checkTimes.size() && sinceLaunch >= checkTimes[taken]);
+            if (check && !checkMovie.empty())
+                fprintf(stderr, "[video] NFSMW_CHECK_MOVIE_FRAMES: capture %d at movie frame %llu\n", taken,
+                    (unsigned long long)game::MovieFramesRendered());
             // NFSMW_UI_KEYS "Shot": this frame, named apart from the timed ones
             // (taken even when it can't be saved: the keys after it wait for it).
             bool shot = !check && ui::TakeShot();
@@ -4461,7 +5713,8 @@ void main()
             }
             if ((check || shot) && s_swapReadable)
             {
-                captureSize = VkDeviceSize(s_swapExtent.width) * s_swapExtent.height * 4;
+                const uint32_t bytesPerPixel = s_swapFormat == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4;
+                captureSize = VkDeviceSize(s_swapExtent.width) * s_swapExtent.height * bytesPerPixel;
                 VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
                 bci.size = captureSize;
                 bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -4494,7 +5747,7 @@ void main()
                 Barrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             if (captureIndex >= 0 && scaleInput)
-                compareShots = RecordCompare(cmd, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh);
+                compareShots = RecordCompare(cmd, tone, scaleInput, w, h, band, bandOn, dx, dy, dw, dh, f.sourceView);
             if (post && !gpuImage)
                 Barrier(cmd, s_source, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -4519,16 +5772,44 @@ void main()
             vkCmdBlitImage(cmd, source, sourceLayout, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 1, &blit, VK_FILTER_LINEAR);
             if (!captures.empty() && pictureRect.extent.width)
-                gameCapture = RecordRegionCapture(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                gameCapture = RecordRegionCapture(cmd, dst, TargetFormat(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, pictureRect);
-            if (uiFrame)
+            if (s_swapHdr)
+            {
+                waitStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                Barrier(cmd, s_hdrTargets.scene, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                Barrier(cmd, s_hdrTargets.ui, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                VkRenderingAttachmentInfoKHR uiColor{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+                uiColor.imageView = s_hdrTargets.uiView;
+                uiColor.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                uiColor.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                uiColor.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                uiColor.clearValue.color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+                VkRenderingInfoKHR ri{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+                ri.renderArea = { { 0, 0 }, s_swapExtent };
+                ri.layerCount = 1;
+                ri.colorAttachmentCount = 1;
+                ri.pColorAttachments = &uiColor;
+                s_context.cmdBeginRendering(cmd, &ri);
+                if (uiFrame)
+                    ui::Draw(cmd);
+                s_context.cmdEndRendering(cmd);
+                RecordHdrComposite(cmd, s_swapImages[imageIndex], s_swapViews[imageIndex]);
+                dst = s_swapImages[imageIndex];
+                Barrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            }
+            else if (uiFrame)
             {
                 waitStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
                 Barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                     VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
                 VkRenderingAttachmentInfoKHR color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
-                color.imageView = s_swapViews[imageIndex];
+                color.imageView = dstView;
                 color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                 color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
                 color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -4773,18 +6054,96 @@ void main()
             if (FILE* out = fopen(path.c_str(), "wb"))
             {
                 fprintf(out, "P6\n%u %u\n255\n", s_swapExtent.width, s_swapExtent.height);
-                const uint8_t* px = static_cast<const uint8_t*>(mapped);
                 std::vector<uint8_t> rgb(size_t(s_swapExtent.width) * s_swapExtent.height * 3);
-                bool bgr = s_swapFormat == VK_FORMAT_B8G8R8A8_UNORM || s_swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
-                for (size_t i = 0; i < rgb.size() / 3; i++)
-                    for (int k = 0; k < 3; k++)
-                        rgb[i * 3 + k] = px[i * 4 + (bgr ? 2 - k : k)];
+                auto sdr = [](float linear) {
+                    return uint8_t(std::lround(hdr::LinearToSrgb(std::clamp(linear, 0.0f, 1.0f)) * 255.0f));
+                };
+                auto pqToSdr = [&](float r, float g, float b) {
+                    r = hdr::PqToNits(r) / s_hdrPaperWhite;
+                    g = hdr::PqToNits(g) / s_hdrPaperWhite;
+                    b = hdr::PqToNits(b) / s_hdrPaperWhite;
+                    hdr::Rec2020ToRec709(r, g, b);
+                    return std::array<uint8_t, 3>{ sdr(r), sdr(g), sdr(b) };
+                };
+                if (s_swapFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || s_swapFormat == VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+                {
+                    const uint32_t* px = static_cast<const uint32_t*>(mapped);
+                    const bool bgr = s_swapFormat == VK_FORMAT_A2R10G10B10_UNORM_PACK32;  // red in the high bits
+                    // NFSMW_CHECK_PRESENT_HDR=1 (DIAGNOSTIC): also the frame
+                    // above SDR white, as present_check_<k>.pfm: linear
+                    // Rec.709 in multiples of paper white, bottom row first.
+                    static const bool hdrDump = [] { const char* v = std::getenv("NFSMW_CHECK_PRESENT_HDR"); return v && v[0] == '1'; }();
+                    std::vector<float> linear(hdrDump ? rgb.size() : 0);
+                    for (size_t i = 0; i < rgb.size() / 3; i++)
+                    {
+                        const uint32_t v = px[i];
+                        const float lo = float(v & 0x3FF) / 1023.0f, hi = float((v >> 20) & 0x3FF) / 1023.0f;
+                        const float pr = bgr ? hi : lo, pg = float((v >> 10) & 0x3FF) / 1023.0f, pb = bgr ? lo : hi;
+                        const auto c = pqToSdr(pr, pg, pb);
+                        rgb[i * 3 + 0] = c[0];
+                        rgb[i * 3 + 1] = c[1];
+                        rgb[i * 3 + 2] = c[2];
+                        if (hdrDump)
+                        {
+                            float r = hdr::PqToNits(pr) / s_hdrPaperWhite, g = hdr::PqToNits(pg) / s_hdrPaperWhite,
+                                  b = hdr::PqToNits(pb) / s_hdrPaperWhite;
+                            hdr::Rec2020ToRec709(r, g, b);
+                            const size_t x = i % s_swapExtent.width, y = s_swapExtent.height - 1 - i / s_swapExtent.width;
+                            float* o = &linear[(y * s_swapExtent.width + x) * 3];
+                            o[0] = r;
+                            o[1] = g;
+                            o[2] = b;
+                        }
+                    }
+                    if (hdrDump)
+                        if (FILE* pfm = fopen((path.substr(0, path.size() - 4) + ".pfm").c_str(), "wb"))
+                        {
+                            fprintf(pfm, "PF\n%u %u\n-1.0\n", s_swapExtent.width, s_swapExtent.height);
+                            fwrite(linear.data(), sizeof(float), linear.size(), pfm);
+                            fclose(pfm);
+                        }
+                }
+                else if (s_swapFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
+                {
+                    const uint16_t* px = static_cast<const uint16_t*>(mapped);
+                    if (s_swapPq)
+                        for (size_t i = 0; i < rgb.size() / 3; i++)
+                        {
+                            const auto c = pqToSdr(tone::FromHalf(px[i * 4 + 0]), tone::FromHalf(px[i * 4 + 1]),
+                                tone::FromHalf(px[i * 4 + 2]));
+                            rgb[i * 3 + 0] = c[0];
+                            rgb[i * 3 + 1] = c[1];
+                            rgb[i * 3 + 2] = c[2];
+                        }
+                    else
+                        for (size_t i = 0; i < rgb.size() / 3; i++)
+                            for (int k = 0; k < 3; k++)
+                                rgb[i * 3 + k] = sdr(tone::FromHalf(px[i * 4 + k]));
+                }
+                else
+                {
+                    const uint8_t* px = static_cast<const uint8_t*>(mapped);
+                    const bool bgr = s_swapFormat == VK_FORMAT_B8G8R8A8_UNORM || s_swapFormat == VK_FORMAT_B8G8R8A8_SRGB;
+                    for (size_t i = 0; i < rgb.size() / 3; i++)
+                        for (int k = 0; k < 3; k++)
+                            rgb[i * 3 + k] = px[i * 4 + (bgr ? 2 - k : k)];
+                }
                 fwrite(rgb.data(), 1, rgb.size(), out);
                 fclose(out);
                 fprintf(stderr, "[video] presented frame saved to %s%s\n", path.c_str(),
                     frameBetween != 0.0f ? std::format(" (an in-between picture at {:.3f})", frameBetween).c_str()
                                          : std::format(" (a game frame{})", frameShift != 0.0f ? std::format(", shift {:.3f}", frameShift) : std::string()).c_str());
                 gpu::renderer::LogOcclusionCounts(path.c_str());  // NFSMW_OCCLUSION=1: the counts behind it
+                static const bool sharpAb = [] { const char* v = std::getenv("NFSMW_SHARP_UI_AB"); return v && v[0] == '1'; }();
+                if (sharpAb)
+                {
+                    uint64_t seq;
+                    {
+                        std::lock_guard lock(s_pendingMutex);
+                        seq = s_lastSeq;
+                    }
+                    fprintf(stderr, "[sharp-ui-ab] %s: image %llu, Sharper UI %s\n", path.c_str(), (unsigned long long)seq, (seq >> 2) & 1 ? "on" : "off");
+                }
             }
             else
                 fprintf(stderr, "[video] can't save a presented frame to %s: %s\n", path.c_str(), strerror(errno));
@@ -4802,6 +6161,19 @@ void main()
             s_swapPolicy.Reported(present == VK_ERROR_OUT_OF_DATE_KHR ? SurfaceResult::OutOfDate : SurfaceResult::Suboptimal);
         s_frameIndex = (s_frameIndex + 1) % FRAMES_IN_FLIGHT;
         return true;
+    }
+
+    void SubmitUiMask(VkImageView mask)
+    {
+        std::lock_guard lock(s_pendingMutex);
+        s_pendingUiMask = mask;
+        s_pendingUiMaskSeq = s_submitSeq + 1;  // the image submitted next
+    }
+
+    uint64_t SubmittedImages()
+    {
+        std::lock_guard lock(s_pendingMutex);
+        return s_submitSeq;
     }
 
     void SubmitFrontImage(VkImage image, uint32_t width, uint32_t height, uint32_t aspectWidth, uint32_t aspectHeight, float between,
@@ -4851,6 +6223,11 @@ void main()
     PresentStats GetPresentStats()
     {
         return { s_dropped.load(std::memory_order_relaxed), s_repeated.load(std::memory_order_relaxed), s_shown.load(std::memory_order_relaxed) };
+    }
+
+    const char* HdrStatus()
+    {
+        return s_hdrStatus.c_str();
     }
 
     VblankLock& GuestVblank()
@@ -4934,21 +6311,8 @@ void main()
         // operator chose a steady 60 there (v020/smooth-steamos/INDEX.txt says how
         // to try it again, e.g. on a later Deck). NFSMW_HFR_DECK=1 offers it anyway.
         static const bool deck = [] {
-            auto read = [](const char* path) {
-                std::string v;
-                if (FILE* f = fopen(path, "r"))
-                {
-                    char buf[64] = {};
-                    if (fgets(buf, sizeof buf, f))
-                        v = buf;
-                    fclose(f);
-                }
-                while (!v.empty() && (v.back() == '\n' || v.back() == ' '))
-                    v.pop_back();
-                return v;
-            };
-            const std::string vendor = read("/sys/class/dmi/id/sys_vendor"), product = read("/sys/class/dmi/id/product_name");
-            const bool isDeck = vendor == "Valve" && (product == "Jupiter" || product == "Galileo");
+            const std::string vendor = ReadDmiLine("/sys/class/dmi/id/sys_vendor"), product = ReadDmiLine("/sys/class/dmi/id/product_name");
+            const bool isDeck = IsSteamDeckDmi(vendor, product);  // video/steam_device.h
             const char* v = std::getenv("NFSMW_HFR_DECK");
             if (isDeck)
                 fprintf(stderr, "[hfr] a Steam Deck (%s): Smooth Motion %s\n", product.c_str(),
