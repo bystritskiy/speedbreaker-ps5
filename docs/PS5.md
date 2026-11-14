@@ -1,6 +1,6 @@
 # SpeedBreaker on PS5: status
 
-What has been tried on a console, and what hasn't. Release 01.000.002, on SpeedBreaker v0.2.0;
+What has been tried on a console, and what hasn't. Release 01.000.004, on SpeedBreaker v0.2.4;
 the build itself is described in [`port/ps5/README.md`](../port/ps5/README.md).
 
 ## Tested on a console
@@ -23,13 +23,18 @@ disc's files in `/data/speedbreaker/game/`, started from its home-screen tile:
 - **Installing from a disc image:** the USA `.iso` in `/data/speedbreaker/`, chosen in the
   first-run installer: every file checked in under 40 seconds, nothing copied, and the game
   then played from the image to the menu and a race.
+- **European discs** (01.000.004): the Europe (English) and Spain `.iso`, each installed from
+  scratch and identified by the installer; their own PAL movies, Spanish speech on the Spanish
+  disc, 60 fps in the menus, and a race.
+- **Languages** (Settings > Language > Text): other text languages on the European English and
+  Spanish discs, after a restart; the speech and movies stay the disc's.
 - **Bug reports:** Save Bug Report writes its zip to `/data/speedbreaker/`, and
   `port/ps5/tools/fetch-report.py` fetches it; no crash reports in the tested sessions.
 
 ## Not tested yet
 
-- Discs other than the USA one (the PAL Spanish disc is left out of the PS5 build).
-- The nine other languages on a console; their text was checked against the disc offline.
+- The German disc, which the release leaves out.
+- Every text language on a console; their text was checked against the disc offline.
 - A disc image on a USB drive, and a whole Career played from an image.
 - Steering wheels, and long sessions of several hours.
 - Every event, car and part of the city: the game is long, and not all of it has been played.

@@ -338,7 +338,14 @@ class Region:
         self.rerun = 'survey/region_map.py table' + ('' if rid == 'pal-es' else f' --region {rid}')
 
 
+PAL_EN_EXTRA_FUNCTIONS = [
+    (0x823AF040, 0xE0, 0x823AF068, 11, 0x823AF118),
+    (0x823AF120, 0xE0, 0x823AF148, 11, 0x823AF1F8),
+]
+
 REGIONS = {
+    'pal-en': Region('pal-en', 'PAL (English)', 'Europe/PAL, English', hook_addresses.PAL_EN_XEX_SHA256,
+                     'PAL_EN_EXTRA_FUNCTIONS', PAL_EN_EXTRA_FUNCTIONS),
     'pal-es': Region('pal-es', 'PAL (Spanish)', 'Europe/PAL, Spanish', hook_addresses.PAL_ES_XEX_SHA256,
                      'PAL_ES_EXTRA_FUNCTIONS', PAL_ES_EXTRA_FUNCTIONS),
     'pal-de': Region('pal-de', 'PAL (German)', 'Europe/PAL, German', hook_addresses.PAL_DE_XEX_SHA256,

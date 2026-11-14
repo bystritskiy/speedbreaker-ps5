@@ -58,6 +58,12 @@ class UploadTest(unittest.TestCase):
         self.assertEqual(ftp.events[:first_write], [('read', p) for p in self.good])
         self.assertEqual(ftp.events[-1], ('rename', self.marker))
 
+    def test_pal_marker_records_detected_region(self):
+        ftp = FTP(self.good)
+        with contextlib.redirect_stdout(io.StringIO()):
+            upload.finish_install(ftp, '/game', 'pal-version', self.entries, region='pal-en')
+        self.assertIn(b'region = "pal-en"', ftp.files[self.marker])
+
     def test_same_size_corruption_prevents_marker(self):
         ftp = FTP(self.good | {'/game/NFS/data': b'xxxx'})
         with self.assertRaisesRegex(ValueError, 'verification failed'):

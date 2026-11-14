@@ -407,7 +407,7 @@ namespace
     // and speech. And each disc's default language (main.cpp).
     void TestGermanDisc()
     {
-        CHECK(DiscLanguage("pal-de") == kGerman && DiscLanguage("pal-es") == kSpanish && DiscLanguage("usa") == -1
+        CHECK(DiscLanguage("pal-en") == kEnglish && DiscLanguage("pal-de") == kGerman && DiscLanguage("pal-es") == kSpanish && DiscLanguage("usa") == -1
             && DiscLanguage("") == -1, "DiscLanguage");
         CHECK(Find(kGerman) && std::string_view(Find(kGerman)->speech) == "ge", "German has its own speech bank");
         std::vector<uint8_t> index;

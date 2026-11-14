@@ -4,10 +4,15 @@
 #include <cassert>
 #include <iterator>
 
-// The German disc's list is always checked (static_asserts below), but it is a
-// game manifest only in a build that links the German code (SB_PAL_DE,
-// runtime/CMakeLists.txt): without it, that disc is refused up front
-// (ReleaseWithoutCode) rather than installed and then not run.
+// All disc lists are checked below, but a PAL manifest is offered only
+// when its corresponding recompiled code is linked. Otherwise that disc is
+// refused before installation (ReleaseWithoutCode).
+#ifndef SB_PAL_ES
+#define SB_PAL_ES 0
+#endif
+#ifndef SB_PAL_EN
+#define SB_PAL_EN 0
+#endif
 #ifndef SB_PAL_DE
 #define SB_PAL_DE 0
 #endif
@@ -37,6 +42,12 @@ namespace install
 #include "manifest_pal_de.inc"
             };
         }
+        namespace pal_en
+        {
+            constexpr ManifestFile s_files[] = {
+#include "manifest_pal_en.inc"
+            };
+        }
 #undef MANIFEST_INFO
 #undef MANIFEST_FILE
 
@@ -57,6 +68,10 @@ namespace install
         namespace pal_de
         {
 #include "manifest_pal_de.inc"
+        }
+        namespace pal_en
+        {
+#include "manifest_pal_en.inc"
         }
 #undef MANIFEST_INFO
 #undef MANIFEST_FILE
@@ -86,8 +101,8 @@ namespace install
         static_assert(std::size(pal_es::s_files) == pal_es::s_count, "manifest_pal_es.inc: file count does not match MANIFEST_INFO");
         static_assert(SumSizes(pal_es::s_files) == pal_es::s_bytes, "manifest_pal_es.inc: sizes do not add up to MANIFEST_INFO's total");
         static_assert(XexOf(pal_es::s_files), "manifest_pal_es.inc: no default.xex entry");
-        // The regions are told apart by default.xex (hash, or size where no
-        // hashing is done) and by the version an install's marker records.
+        // The executable hash and install marker distinguish regions. Sizes
+        // are only a shortcut when unique (English and Spanish PAL share one).
         static_assert(XexOf(usa::s_files)->sha256 != XexOf(pal_es::s_files)->sha256, "two regions with one default.xex");
         static_assert(XexOf(usa::s_files)->size != XexOf(pal_es::s_files)->size, "two regions' default.xex of one size");
         static_assert(usa::s_version != pal_es::s_version, "two regions with one manifest version");
@@ -101,16 +116,39 @@ namespace install
         static_assert(pal_de::s_version != usa::s_version && pal_de::s_version != pal_es::s_version,
             "two regions with one manifest version");
 
+        static_assert(std::size(pal_en::s_files) == pal_en::s_count);
+        static_assert(SumSizes(pal_en::s_files) == pal_en::s_bytes);
+        static_assert(XexOf(pal_en::s_files));
+        static_assert(XexOf(pal_en::s_files)->sha256 != XexOf(usa::s_files)->sha256
+            && XexOf(pal_en::s_files)->sha256 != XexOf(pal_es::s_files)->sha256
+            && XexOf(pal_en::s_files)->sha256 != XexOf(pal_de::s_files)->sha256);
+        static_assert(pal_en::s_version != usa::s_version && pal_en::s_version != pal_es::s_version
+            && pal_en::s_version != pal_de::s_version);
+
         constexpr Manifest s_usa{ usa::s_version, usa::s_titleId, usa::s_files, usa::s_bytes, "usa", "USA" };
+#if SB_PAL_ES
         constexpr Manifest s_palEs{ pal_es::s_version, pal_es::s_titleId, pal_es::s_files, pal_es::s_bytes, "pal-es",
             "Europe (PAL, Spanish)" };
+#endif
 #if SB_PAL_DE
         constexpr Manifest s_palDe{ pal_de::s_version, pal_de::s_titleId, pal_de::s_files, pal_de::s_bytes, "pal-de",
             "Europe (PAL, German)" };
-        constexpr const Manifest* s_manifests[] = { &s_usa, &s_palEs, &s_palDe };
-#else
-        constexpr const Manifest* s_manifests[] = { &s_usa, &s_palEs };
 #endif
+#if SB_PAL_EN
+        constexpr Manifest s_palEn{ pal_en::s_version, pal_en::s_titleId, pal_en::s_files, pal_en::s_bytes, "pal-en",
+            "Europe (PAL, English)" };
+#endif
+        constexpr const Manifest* s_manifests[] = { &s_usa,
+#if SB_PAL_ES
+            &s_palEs,
+#endif
+#if SB_PAL_DE
+            &s_palDe,
+#endif
+#if SB_PAL_EN
+            &s_palEn,
+#endif
+        };
 
         char Lower(char c)
         {
@@ -171,10 +209,14 @@ namespace install
 
     const Manifest* ManifestForXexSize(uint64_t size)
     {
+        const Manifest* found = nullptr;
         for (const Manifest* m : s_manifests)
             if (m->Xex().size == size)
-                return m;
-        return nullptr;
+            {
+                if (found) return nullptr;  // English and Spanish PAL share a size.
+                found = m;
+            }
+        return found;
     }
 
     const Manifest* ManifestForVersion(std::string_view version)
@@ -187,6 +229,14 @@ namespace install
 
     ReleaseWithoutCodeInfo ReleaseWithoutCode(std::string_view sha256)
     {
+#if !SB_PAL_ES
+        if (sha256 == XexOf(pal_es::s_files)->sha256)
+            return { "Europe (PAL, Spanish)", "Spanish (PAL)", "ppc-pal-es" };
+#endif
+#if !SB_PAL_EN
+        if (sha256 == XexOf(pal_en::s_files)->sha256)
+            return { "Europe (PAL, English)", "English (PAL)", "ppc-pal-en" };
+#endif
 #if !SB_PAL_DE
         if (sha256 == XexOf(pal_de::s_files)->sha256)
             return { "Europe (PAL, German)", "German (PAL)", "ppc-pal-de" };

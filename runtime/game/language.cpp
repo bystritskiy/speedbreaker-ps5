@@ -155,6 +155,15 @@ namespace game::language
         const Files* f = FilesOf(id);
         return l && f ? Note(*l, *f) : std::string();
     }
+
+    std::string DiscAudio()
+    {
+        std::string out;
+        for (size_t i = 0; i < std::size(kLanguages); i++)
+            if (kLanguages[i].id <= kSpanish && InstalledFiles().files[i].speech)
+                out += (out.empty() ? "" : ", ") + std::string(kLanguages[i].name);
+        return out;
+    }
 }
 
 SB_HOOK(sub_822BCBC8)

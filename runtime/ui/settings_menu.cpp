@@ -48,6 +48,7 @@ namespace ui
         bool s_focusFirstRow = true; // put the controller's cursor on the page's first row
         Id s_described = Id::Count;  // the row the help line describes
         bool s_describedBugReport = false;  // ...or Save Bug Report's
+        bool s_describedAudio = false;  // ...or Settings > Language > Audio's (PS5)
         bool s_describedUpdate = false;     // ...or Check for Updates'
         bool s_opened = true;        // just opened: take focus
         // The Controls page (KeyRow). A row's two keys are cells; the chosen
@@ -608,6 +609,17 @@ namespace ui
                 report::SaveBugReport();
         }
 
+#ifdef __PROSPERO__
+        // Settings > Language > Audio: the speech and movies' language, which
+        // only the disc decides (each known disc has one), so it is shown,
+        // not chosen. Text, above it, picks the text.
+        void AudioRow(float valueWidth)
+        {
+            static const std::string audio = game::language::DiscAudio();
+            ActionRow("audio", "Audio", audio.empty() ? "None" : audio.c_str(), valueWidth, s_describedAudio);
+        }
+#endif
+
         // A (or a click) asks GitHub, and the dialog shows the answer.
         void UpdateRow(float valueWidth)
         {
@@ -700,6 +712,14 @@ namespace ui
                 UpdateRowHelp();
                 return;
             }
+#ifdef __PROSPERO__
+            if (s_describedAudio)
+            {
+                ImGui::TextWrapped("The language of speech and movies. Set by the installed disc.");
+                ImGui::TextDisabled(" ");
+                return;
+            }
+#endif
             if (s_describedBugReport)
             {
 #if defined(__APPLE__) && TARGET_OS_IOS
@@ -938,6 +958,7 @@ namespace ui
             ImGui::SetKeyOwner(ImGuiKey_GamepadFaceLeft, ImHashStr("controls-x"));
         s_described = Id::Count;
         s_describedBugReport = false;
+        s_describedAudio = false;
         s_describedUpdate = false;
         s_describedCal = false;
         if (s_waiting != Id::Count && settings::Info(s_waiting).category != s_category)
@@ -1007,6 +1028,10 @@ namespace ui
                     if (category == Category::Advanced)
                         for (const char* text : { "Saving...", "Checking...", "Couldn't check (offline)", UpdateRowValue() })
                             valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
+#ifdef __PROSPERO__
+                    if (category == Category::Game)
+                        valueWidth = std::max(valueWidth, ImGui::CalcTextSize(game::language::DiscAudio().c_str()).x);
+#endif
                     if (category == Category::Wheel)
                         for (const char* text : { "Start", "17/17" })
                             valueWidth = std::max(valueWidth, ImGui::CalcTextSize(text).x);
@@ -1032,6 +1057,10 @@ namespace ui
                                 }
                         if (category == Category::Wheel)
                             CalibrateRow(valueWidth);
+#ifdef __PROSPERO__
+                        if (category == Category::Game)
+                            AudioRow(valueWidth);
+#endif
                         if (category == Category::Advanced)
                         {
                             BugReportRow(valueWidth);

@@ -71,7 +71,7 @@ def main():
     region = 'pal-es'
     if '--region' in args:
         i = args.index('--region')
-        if i + 1 >= len(args) or args[i + 1] not in ('pal-es', 'pal-de'):
+        if i + 1 >= len(args) or args[i + 1] not in ('pal-es', 'pal-de', 'pal-en'):
             sys.exit(__doc__)
         region = args[i + 1]
         del args[i:i + 2]

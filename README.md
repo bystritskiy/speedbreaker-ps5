@@ -41,7 +41,7 @@
 > SpeedBreaker itself; report bugs of the PS5 build here, not upstream.
 >
 > **No game files are included or distributed.** To play, you need your own legally obtained
-> backup of your own Xbox 360 disc of *Need for Speed: Most Wanted* (2005), USA version. Please
+> backup of your own Xbox 360 disc of *Need for Speed: Most Wanted* (2005): USA, European English or Spanish. Please
 > don't ask for, or share, game files or disc images. See the full [legal notice](#legal-notice).
 
 **Contents:** [What it is](#what-it-is) · [Highlights](#highlights) ·
@@ -108,10 +108,14 @@ even its PlayStation button text is made at run time from your disc's own text.
 - A **PS5 that runs homebrew**, with **ShadowMountPlus** (it puts folder apps on the home screen)
   and an **FTP server** (ftpsrv, port 2121) for copying files. This is homebrew, not a
   PlayStation Store app.
-- Your own **USA (NTSC-U) Xbox 360 disc** of *Need for Speed: Most Wanted* (2005), backed up by
-  you as a disc image (`.iso`) or extracted files: its `default.xex` has SHA-256
-  `aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c`. Other regions aren't
-  supported on the PS5 yet.
+- Your own **Xbox 360 disc** of *Need for Speed: Most Wanted* (2005), backed up by you as a disc
+  image (`.iso`) or extracted files. The PS5 release takes three discs, told apart by the SHA-256
+  of their `default.xex`:
+  - USA (NTSC-U): `aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c`
+  - Europe, English (PAL): `e2ea2ff11bf84cb30430d824d7bfe699a3acf3e7400d21b9a7c938e3d7a10474`
+  - Spain (PAL): `aad15fc218d034de3131f746e0b763dd8049a40dd676efc87667fcaf4fc72694`
+
+  The German disc can be included in a source build ([PAL builds](docs/REGION_PAL_EN.md)).
 - About 8 GB free on the console for the disc image (7.5 GB for extracted files).
 
 ## Install
@@ -122,13 +126,13 @@ even its PlayStation button text is made at run time from your disc's own text.
    [RecompStore](https://recompstore.com/game/PPSA90505).
 2. **Your disc.** Copy the disc image (`.iso`) you made from your own disc to
    `/data/speedbreaker/` over FTP (or to `/data/` or the top of a USB drive). Start the tile,
-   choose the image and press **Install**: every file is checked against the USA disc, which
-   takes under a minute, and nothing is copied. The game is played from the image, so keep it
+   choose the image and press **Install**: every file is checked against your disc's known
+   files, which takes under a minute, and nothing is copied. The game is played from the image, so keep it
    where it is.
 
    Or extract the image (for example with extract-xiso) and copy `default.xex`, `NFS/` and
    `Movies/` (49 files, 7.1 GB) to `/data/speedbreaker/game/`. The uploader checks every file
-   against the USA disc, reads each one back, and marks the game as installed only when all of
+   against your disc's known files, reads each one back, and marks the game as installed only when all of
    them match:
 
    ```sh
@@ -202,7 +206,8 @@ crash report is included. **Never attach game files or disc images to an issue.*
 
 ## Known issues
 
-- **USA disc only** for now.
+- **USA, European English and Spanish discs only:** the German disc and other editions aren't in
+  the release.
 - **Not every part of the game has been played on a console yet:** menus, Career, Quick Race,
   pursuits, saves, sound, controls and rumble have; [`docs/PS5.md`](docs/PS5.md) lists what has
   been tried and what hasn't.
@@ -227,7 +232,7 @@ community projects (PS5_Vulkan, PS5_PayloadSDK, PS5_Mesa); no Sony SDK is used.
 ### Building from source
 
 The repository contains no game code: the build recompiles your own `default.xex`, from the USA
-disc. The generated code (`ppc/`), the game files (`game/`) and the toolchain (`tools/`) are
+disc (and from the European ones for their `ppc-pal-*/`). The generated code (`ppc/`), the game files (`game/`) and the toolchain (`tools/`) are
 ignored by git. **Never commit or share them.**
 
 On a Mac, from the repository root:

@@ -322,6 +322,12 @@ static void SetReleaseDefaults(int argc, char** argv)
         std::error_code ec;
         uint64_t size = std::filesystem::file_size(argv[1], ec);
         manifest = ec ? nullptr : install::ManifestForXexSize(size);
+        if (!ec && !manifest)
+        {
+            const auto file = LoadFile(argv[1]);
+            if (!file.empty())
+                manifest = install::ManifestForXexHash(install::ToHex(install::Sha256Of(file.data(), file.size())));
+        }
     }
     else if (std::optional<install::GameInstall> game = install::FindGameInstall())
         manifest = game->manifest;
@@ -666,6 +672,13 @@ int main(int argc, char** argv)
     {
         std::string sha = install::ToHex(install::Sha256Of(file.data(), file.size()));
         const install::Manifest* known = install::ManifestForXexHash(sha);
+        if (const auto missing = install::ReleaseWithoutCode(sha); !missing.codeFolder.empty())
+        {
+            fprintf(stderr, "[runtime] this build has no recompiled code for %.*s (requires %.*s/)\n",
+                int(missing.regionName.size()), missing.regionName.data(),
+                int(missing.codeFolder.size()), missing.codeFolder.data());
+            return 1;
+        }
         const install::Manifest& manifest = known ? *known : install::GameManifest();
         report::SetSystemItem("Game", std::format("{} ({}); default.xex {} bytes, SHA-256 {} ({}); manifest {}",
             GetGamePath().string(), gameOrigin, file.size(), sha,

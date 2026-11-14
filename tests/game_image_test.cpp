@@ -35,7 +35,10 @@ int main(int argc, char** argv)
         return 0;
     }
     const fs::path image = fs::absolute(imageVar).lexically_normal();
-    const Manifest& manifest = GameManifest();
+    std::unique_ptr<DiscSource> detected;
+    CHECK(OpenDiscSource(image, detected).Ok() && detected, "open source for region detection");
+    if (!detected) return 1;
+    const Manifest& manifest = SourceManifest(*detected);
 
     Result mounted = image::Mount(image);
     CHECK(mounted.Ok(), "mount: %s", mounted.message.c_str());
@@ -78,6 +81,8 @@ int main(int argc, char** argv)
     const fs::path scratch = fs::absolute(argv[1]) / "game-image-test";
     fs::remove_all(scratch);
     fs::create_directories(scratch / "home");
+    const auto previousDir = fs::current_path();
+    fs::current_path(scratch);  // Do not discover the checkout's game/files as an existing install.
     setenv("HOME", (scratch / "home").c_str(), 1);
     unsetenv("XDG_DATA_HOME");
     unsetenv("NFSMW_GAME_DIR");
@@ -98,6 +103,7 @@ int main(int argc, char** argv)
     std::ofstream(GetUserPath() / "game-image") << path << "\n0123456789abcdef\n" << size << "\n";
     CHECK(!FindGameInstall(), "another manifest version: checked again");
     CHECK(RecordInstallPath(DefaultInstallPath()) && !fs::exists(GetUserPath() / "game-image"), "a folder install takes over");
+    fs::current_path(previousDir);
     fs::remove_all(scratch);
 
     printf(g_failures ? "game_image_test: %d failures\n" : "game_image_test: all checks passed\n", g_failures);

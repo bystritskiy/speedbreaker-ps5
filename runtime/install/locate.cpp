@@ -78,7 +78,21 @@ namespace install
             uint64_t size = fs::file_size(xex, ec);
             if (ec)
                 return std::nullopt;
-            const Manifest& manifest = Pick(requested, ManifestForXexSize(size));
+            const auto marker = ReadInstallMarker(dir);
+            const Manifest* detected = marker ? ManifestForVersion(*marker) : nullptr;
+            if (!detected) detected = ManifestForXexSize(size);
+            if (!detected && IsGameManifest(requested))
+            {
+                // Different PAL executables can have the same size. With no
+                // current install marker, identify this one by its hash.
+                std::unique_ptr<DiscSource> source;
+                XexIdentity identity;
+                if (!OpenDiscSource(dir, source).Ok() || !IdentifyXex(*source, identity).Ok())
+                    return std::nullopt;
+                detected = ManifestForXexHash(ToHex(identity.sha256));
+                if (!detected) return std::nullopt;
+            }
+            const Manifest& manifest = Pick(requested, detected);
             if (size != manifest.Xex().size)
                 return std::nullopt;
             if (requireMarker && ReadInstallMarker(dir) != std::optional<std::string>(manifest.version))

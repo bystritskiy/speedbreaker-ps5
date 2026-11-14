@@ -30,6 +30,24 @@ else()
     set(SB_SETTINGS_LIBS)
 endif()
 
+# Installer availability must match the linked code, in each combination.
+foreach(es RANGE 0 1)
+    foreach(de RANGE 0 1)
+        foreach(en RANGE 0 1)
+            set(name region_availability_${es}${de}${en})
+            add_executable(${name} region_availability_test.cpp ${RT}/install/manifest.cpp)
+            target_include_directories(${name} PRIVATE ${RT})
+            target_compile_definitions(${name} PRIVATE SB_PAL_ES=${es} SB_PAL_DE=${de} SB_PAL_EN=${en})
+            if(SB_MSVC_FRONTEND)
+                target_compile_options(${name} PRIVATE /O2 -UNDEBUG)
+            else()
+                target_compile_options(${name} PRIVATE -O2 -UNDEBUG)
+            endif()
+            add_test(NAME ${name} COMMAND ${name})
+        endforeach()
+    endforeach()
+endforeach()
+
 sb_test(block_ranges_test)
 # Where guest memory and the upload ring go (gpu/memory_plan.h, header only).
 sb_test(memory_plan_test)
@@ -326,6 +344,7 @@ if(NOT WIN32)
         ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp ${RT}/install/sha256.cpp
         ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp
         ARGS ${CMAKE_BINARY_DIR}/region_manifest_scratch)
+    target_compile_definitions(region_manifest_test PRIVATE SB_PAL_ES=1)
     # The game read from a disc image in place (install/game_image.h,
     # install::UseImage), against the image NFSMW_TEST_IMAGE names; without
     # it, skipped.
@@ -333,6 +352,8 @@ if(NOT WIN32)
         ${RT}/install/locate.cpp ${RT}/install/manifest.cpp ${RT}/install/result.cpp ${RT}/install/disc_source.cpp
         ${RT}/install/sha256.cpp ${RT}/user/portable.cpp ${RT}/platform/posix/file_io.cpp
         ARGS ${CMAKE_BINARY_DIR}/game_image_scratch)
+    target_compile_definitions(game_image_test PRIVATE SB_PAL_ES=$<BOOL:${SB_HAVE_PAL_ES}>
+        SB_PAL_DE=$<BOOL:${SB_HAVE_PAL_DE}> SB_PAL_EN=$<BOOL:${SB_HAVE_PAL_EN}>)
     # The same with the German code linked (SB_PAL_DE): three regions, and the
     # German disc's installs.
     add_executable(region_manifest_test_pal_de ${CMAKE_CURRENT_SOURCE_DIR}/region_manifest_test.cpp
@@ -342,9 +363,16 @@ if(NOT WIN32)
     target_include_directories(region_manifest_test_pal_de PRIVATE ${RT})
     target_link_libraries(region_manifest_test_pal_de PRIVATE Threads::Threads)
     target_compile_options(region_manifest_test_pal_de PRIVATE -O2 -UNDEBUG)
-    target_compile_definitions(region_manifest_test_pal_de PRIVATE SB_PAL_DE=1)
+    target_compile_definitions(region_manifest_test_pal_de PRIVATE SB_PAL_ES=1 SB_PAL_DE=1)
     add_test(NAME region_manifest_test_pal_de COMMAND region_manifest_test_pal_de ${CMAKE_BINARY_DIR}/region_manifest_pal_de_scratch)
+    add_executable(region_manifest_test_all $<TARGET_PROPERTY:region_manifest_test,SOURCES>)
+    target_include_directories(region_manifest_test_all PRIVATE ${RT})
+    target_link_libraries(region_manifest_test_all PRIVATE Threads::Threads)
+    target_compile_options(region_manifest_test_all PRIVATE -O2 -UNDEBUG)
+    target_compile_definitions(region_manifest_test_all PRIVATE SB_PAL_ES=1 SB_PAL_DE=1 SB_PAL_EN=1)
+    add_test(NAME region_manifest_test_all COMMAND region_manifest_test_all ${CMAKE_BINARY_DIR}/region_manifest_all_scratch)
     if(APPLE AND NOT IOS)
+        target_link_libraries(region_manifest_test_all PRIVATE "-framework CoreFoundation")
         target_link_libraries(install_folder_test PRIVATE "-framework CoreFoundation")  # placement.cpp's iCloud check
         target_link_libraries(portable_test PRIVATE "-framework CoreFoundation")
         target_link_libraries(region_manifest_test PRIVATE "-framework CoreFoundation")
@@ -384,6 +412,13 @@ if(Python3_Interpreter_FOUND)
     else()
         add_test(NAME region_addresses_check_pal_de COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
             ${ROOT} --region pal-de)
+    endif()
+    if(SB_REGION_SURVEY AND EXISTS ${SB_REGION_SURVEY}/mw_en/funcmap.tsv)
+        add_test(NAME region_addresses_check_pal_en COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} ${SB_REGION_SURVEY}/mw_usa ${SB_REGION_SURVEY}/mw_en ${SB_REGION_SURVEY}/mw_en/funcmap.tsv --region pal-en)
+    else()
+        add_test(NAME region_addresses_check_pal_en COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/region_addresses_check.py
+            ${ROOT} --region pal-en)
     endif()
     # survey/func_map.py (the function map region_map.py takes) and
     # region_map.py's search for jump tables only another build has, on two

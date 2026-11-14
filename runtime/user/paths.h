@@ -173,5 +173,5 @@ std::string MigrateUserFolders();
 // European (PAL, German) one's go to save-pal-de/ the same way.
 inline std::filesystem::path GetSavePath(bool)
 {
-    return GetUserPath() / (region::IsPalDe() ? "save-pal-de" : region::IsPalEs() ? "save-pal-es" : "save");
+    return GetUserPath() / (region::IsPalEn() ? "save-pal-en" : region::IsPalDe() ? "save-pal-de" : region::IsPalEs() ? "save-pal-es" : "save");
 }

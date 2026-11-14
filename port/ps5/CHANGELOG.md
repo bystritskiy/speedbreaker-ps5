@@ -3,6 +3,17 @@
 What changed in each release of SpeedBreaker for PS5, newest first. The app shows the newest
 entry once, the first time you start it after an update.
 
+## 01.000.004
+
+### What's new
+
+- **European discs:** besides the USA disc, the installer now takes the European English disc
+  (Need for Speed - Most Wanted (Europe)) and the Spanish one (Spain), each with its own movies
+  and speech. It tells them apart by their files; their saves are kept apart from the USA's.
+- **Language page** (Settings > Language): Text sets the menus and race text to any of the
+  game's ten languages, on any disc, from the next start. Audio shows the language of the
+  disc's speech and movies, which only the disc decides.
+
 ## 01.000.003
 
 ### What's new

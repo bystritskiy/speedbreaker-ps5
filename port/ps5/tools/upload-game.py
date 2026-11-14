@@ -5,7 +5,7 @@ console over FTP (ftpsrv, port 2121), where the game finds it:
 
     python3 -I port/ps5/tools/upload-game.py --addr <console> <extracted disc folder>
 
-Checks the USA manifest before sending. Existing files are kept only if their
+Detects the release by default.xex and checks its manifest before sending. Existing files are kept only if their
 size and SHA-256 match; uploads are read back and verified before renaming.
 Writes .nfsmw-install last, after every remote file matches the manifest."""
 import argparse
@@ -25,7 +25,7 @@ def load_manifest(path):
     info = re.search(r'MANIFEST_INFO\("([^"]+)",\s*0x[0-9A-Fa-f]+,\s*(\d+),\s*(\d+)ull\)', text)
     files = re.findall(r'MANIFEST_FILE\("([^"]+)",\s*(\d+)ull,\s*"([0-9a-f]{64})"\)', text)
     if not info or len(files) != int(info[2]) or sum(int(x[1]) for x in files) != int(info[3]):
-        raise ValueError('invalid USA install manifest: ' + str(path))
+        raise ValueError('invalid install manifest: ' + str(path))
     return info[1], [(name, int(size), digest) for name, size, digest in files]
 
 
@@ -69,7 +69,7 @@ def remove(ftp, path):
             raise
 
 
-def finish_install(ftp, destination, version, entries, repair=None):
+def finish_install(ftp, destination, version, entries, repair=None, region="usa"):
     # Recheck every published file, including ones a caller skipped. No marker
     # may claim a verified install after a truncated or same-size corrupt copy.
     for name, size, digest in entries:
@@ -81,10 +81,10 @@ def finish_install(ftp, destination, version, entries, repair=None):
                 raise ValueError('remote repair verification failed: ' + name)
         print('verified', name, flush=True)
     xex = next(digest for name, _, digest in entries if name == 'default.xex')
-    marker = ('# SpeedBreaker: all remote files verified against the USA manifest.\n'
+    marker = ('# SpeedBreaker: all remote files verified against the disc manifest.\n'
               f'manifest_version = "{version}"\nxex_sha256 = "{xex}"\n'
               f'files = {len(entries)}\nbytes = {sum(size for _, size, _ in entries)}\n'
-              'region = "usa"\n').encode()
+              f'region = "{region}"\n').encode()
     target = destination + '/' + MARKER
     ftp.storbinary('STOR ' + target + '.part', io.BytesIO(marker))
     if not remote_matches(ftp, target + '.part', len(marker), hashlib.sha256(marker).hexdigest()):
@@ -99,10 +99,20 @@ def main():
     p.add_argument('--dest', default='/data/speedbreaker/game')
     p.add_argument('folder', type=pathlib.Path)
     a = p.parse_args()
-    manifest = pathlib.Path(__file__).resolve().parents[3] / 'runtime/install/manifest.inc'
-    version, entries = load_manifest(manifest)
+    root = pathlib.Path(__file__).resolve().parents[3] / 'runtime/install'
+    xex = next((f for f in a.folder.iterdir() if f.name.lower() == 'default.xex' and f.is_file()), None)
+    if xex is None:
+        raise ValueError('missing default.xex')
+    digest = hashlib.sha256(xex.read_bytes()).hexdigest()
+    for manifest in [root / 'manifest.inc', *sorted(root.glob('manifest_pal_*.inc'))]:
+        version, entries = load_manifest(manifest)
+        if any(name == 'default.xex' and expected == digest for name, _, expected in entries):
+            region = 'usa' if manifest.name == 'manifest.inc' else manifest.stem.removeprefix('manifest_').replace('_', '-')
+            break
+    else:
+        raise ValueError('unsupported default.xex: ' + digest)
     files = local_files(a.folder, entries)
-    print('source verified:', len(entries), 'USA files', flush=True)
+    print('source verified:', len(entries), region, 'files', flush=True)
     ftp = ftplib.FTP()
     ftp.connect(a.addr, 2121, timeout=120)
     ftp.login()
@@ -150,7 +160,7 @@ def main():
         remove(ftp, remote)
         ftp.rename(remote + '.part', remote)
         print('repaired', rel, flush=True)
-    finish_install(ftp, a.dest, version, entries, repair)
+    finish_install(ftp, a.dest, version, entries, repair, region=region)
     ftp.quit()
     print(f'{len(files)} files, {total / 1e9:.2f} GB sent in {time.time() - start:.0f} s')
 

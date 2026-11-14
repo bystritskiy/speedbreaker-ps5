@@ -39,6 +39,7 @@ namespace region
         Usa,
         PalEs,
         PalDe,
+        PalEn,
     };
 
     namespace detail
@@ -61,6 +62,11 @@ namespace region
     inline bool IsPalDe()
     {
         return detail::g_release == Release::PalDe;
+    }
+
+    inline bool IsPalEn()
+    {
+        return detail::g_release == Release::PalEn;
     }
 
     // Any European (PAL) executable: it boots in its disc's own language and
@@ -107,6 +113,7 @@ namespace region
     };
     const AddressPair* PalEsTable(size_t& count);
     const AddressPair* PalDeTable(size_t& count);
+    const AddressPair* PalEnTable(size_t& count);
 }
 
 #define SB_CAT2(a, b) a##b
@@ -148,7 +155,23 @@ namespace region
 #define SB_PAL_DE_ORIGINAL(name)
 #endif
 
-#if SB_PAL_ES || SB_PAL_DE
+#if SB_PAL_EN
+#include "pal_en_names.h"
+#define SB_PAL_EN_SUB(name) SB_CAT(SB_PAL_EN_, name)
+#define SB_PAL_EN_IMP(name) SB_CAT(__imp__, SB_PAL_EN_SUB(name))
+#define SB_PAL_EN_FORWARD(name) \
+    namespace pal_en \
+    { \
+        PPC_FUNC(SB_PAL_EN_IMP(name)); \
+        PPC_FUNC(SB_PAL_EN_SUB(name)) { ::name(ctx, base); } \
+    }
+#define SB_PAL_EN_ORIGINAL(name) ::region::IsPalEn() ? pal_en::SB_PAL_EN_IMP(name) :
+#else
+#define SB_PAL_EN_FORWARD(name)
+#define SB_PAL_EN_ORIGINAL(name)
+#endif
+
+#if SB_PAL_ES || SB_PAL_DE || SB_PAL_EN
 // A hook of the recompiled function `name` (sub_<USA address>), followed by
 // its body: declares the original in every release, and makes each PAL
 // code's own copy of the function (weak) call this hook.
@@ -157,10 +180,11 @@ namespace region
     PPC_FUNC(name); \
     SB_PAL_ES_FORWARD(name) \
     SB_PAL_DE_FORWARD(name) \
+    SB_PAL_EN_FORWARD(name) \
     PPC_FUNC(name)
 
 // The running release's recompiled body of the hooked function `name`.
-#define SB_ORIGINAL(name) (SB_PAL_ES_ORIGINAL(name) SB_PAL_DE_ORIGINAL(name) __imp__##name)
+#define SB_ORIGINAL(name) (SB_PAL_ES_ORIGINAL(name) SB_PAL_DE_ORIGINAL(name) SB_PAL_EN_ORIGINAL(name) __imp__##name)
 #else
 #define SB_HOOK(name) \
     extern "C" PPC_FUNC(__imp__##name); \

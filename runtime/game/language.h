@@ -86,7 +86,7 @@ namespace game::language
     // (main.cpp). -1 for the USA disc, whose default stays English.
     constexpr int32_t DiscLanguage(std::string_view region)
     {
-        return region == "pal-es" ? kSpanish : region == "pal-de" ? kGerman : -1;
+        return region == "pal-en" ? kEnglish : region == "pal-es" ? kSpanish : region == "pal-de" ? kGerman : -1;
     }
 
     constexpr const Language* Find(int32_t id)
@@ -263,6 +263,11 @@ namespace game::language
     // The menu's note for the language `id` with the installed files (read
     // once; game/language.cpp). "" for an id not in the table.
     std::string MenuNote(int32_t id);
+
+    // The languages the installed disc's speech banks are in ("English",
+    // "Spanish"; comma-separated if several, "" for none): Settings >
+    // Language > Audio, which shows it.
+    std::string DiscAudio();
 
     // This run's language instead of the setting's (main.cpp: the first run
     // of a PAL install made by the installer, whose settings were loaded

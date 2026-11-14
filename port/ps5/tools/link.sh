@@ -72,6 +72,17 @@ for item in "${radv_link_inputs[@]}"; do
     radv_inputs+=("$item")
 done
 
+region_libs=()
+for region in Es De En; do
+    case "$region" in Es) flag=ES;; De) flag=DE;; En) flag=EN;; esac
+    if ! grep -q "^SB_HAVE_PAL_${flag}:INTERNAL=ON$" "$BUILD/CMakeCache.txt"; then
+        continue
+    fi
+    lib="$BUILD/recomp/libNfsmwRecompPal${region}Lib.a"
+    [ -f "$lib" ] || { echo "missing enabled region library: $lib" >&2; exit 1; }
+    region_libs+=("$lib")
+done
+
 stubs=()
 for file in "$SDK"/target/lib/*.so; do
     case "$file" in *libScePosixForWebKit.so|*libSceGLSlimVSH.so|*libc_stub_weak.so) continue;; esac
@@ -85,7 +96,7 @@ done
     -e _start -o "$WORK/llvm-pie.elf" \
     "$WORK/obj/app_crt.o" "$WORK/obj/emutls.o" "$WORK/stubs/libSceAgc.so" "$WORK/stubs/libSceAgcDriver.so" \
     --whole-archive "$BUILD/runtime/libSpeedBreaker.a" --no-whole-archive \
-    --start-group "$BUILD/recomp/libNfsmwRecompLib.a" "$BUILD/runtime/libXenonUtilsLite.a" \
+    --start-group "$BUILD/recomp/libNfsmwRecompLib.a" "${region_libs[@]}" "$BUILD/runtime/libXenonUtilsLite.a" \
     "$BUILD/runtime/libo1heap.a" "$BUILD/runtime/libimgui.a" \
     "$ROOT/build/ps5-deps/sdl3/lib/libSDL3.a" \
     "$ROOT/build/ps5-deps/glslang/lib/libglslang.a" "$ROOT/build/ps5-deps/glslang/lib/libglslang-default-resource-limits.a" \

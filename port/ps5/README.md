@@ -16,9 +16,10 @@ See `docs/PS5.md` for what has been tried on a console, and what hasn't yet;
 
 ## Game files
 
-The USA (NTSC-U) disc only for now (`default.xex` SHA-256
+The release takes the USA (NTSC-U) disc (`default.xex` SHA-256
 `aebdf3c14d1e4e4ed2c130d94bc1a0e97bd6d5bf39bdfdef33c3909c9cc4ba4c`, the
-supported executable of the other platforms). Either
+supported executable of the other platforms), the European English one
+(`e2ea2ff1...`) and the Spanish one (`aad15fc2...`). Either
 
 - copy the extracted disc (`default.xex`, `NFS/`, `Movies/`, 49 files,
   7.1 GB) to `/data/speedbreaker/game/`, for example with
@@ -31,6 +32,14 @@ The FTP uploader verifies the source against the USA manifest, reads back and
 hashes every remote file, and writes `.nfsmw-install` last: the game counts the
 files as installed only with that marker. A full readback moves 7.1 GB over the
 network even when no file needs uploading.
+
+The European English (`pal-en`), Spanish (`pal-es`) and German (`pal-de`)
+discs each need their own recompiled code, generated from that disc's
+`default.xex` (`ppc-pal-en/`, `ppc-pal-es/`, `ppc-pal-de/`). See
+[European English PAL](../../docs/REGION_PAL_EN.md) for the steps. The
+release is built with `SB_PAL_EN=ON` and `SB_PAL_ES=ON`; `SB_PAL_DE=ON` adds
+the German disc, and `AUTO` includes each when its code is present. The
+uploader detects these discs by their executable hash.
 
 Saves, settings, logs (`logs/`) and the shader cache (`cache/`) are in
 `/data/speedbreaker/`.
@@ -75,7 +84,8 @@ cmake -S . -B build/ps5 -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=$PWD/port/ps5/cmake/ps5.cmake \
   -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm@18/bin/clang \
   -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@18/bin/clang++ \
-  -DPS5_PAYLOAD_SDK=$PWD/build/ps5-deps/PS5_Vulkan/.deps/native/ps5-payload-sdk -DSB_PAL_ES=OFF
+  -DPS5_PAYLOAD_SDK=$PWD/build/ps5-deps/PS5_Vulkan/.deps/native/ps5-payload-sdk \
+  -DSB_PAL_EN=ON -DSB_PAL_ES=ON  # ppc-pal-en/ and ppc-pal-es/ from those discs; OFF for USA only
 ninja -C build/ps5 SpeedBreaker
 port/ps5/tools/link.sh
 ```

@@ -119,6 +119,15 @@ namespace settings
                 entries[i] = { game::language::kLanguages[i].id, game::language::kLanguages[i].token, game::language::kLanguages[i].name };
             return entries;
         }();
+#ifdef __PROSPERO__
+        // Settings > Language: the text, then the disc's audio (Audio, a row
+        // that only shows it: ui/settings_menu.cpp).
+        constexpr const char* kLanguageLabel = "Text";
+        constexpr const char* kLanguageDescription = "The language of menus and race text.";
+#else
+        constexpr const char* kLanguageLabel = "Language";
+        constexpr const char* kLanguageDescription = "The language of the game's menus and race text: English (the USA disc's), or French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or Finnish, from the same disc's files. The movies and the speech stay in English, as the disc has them. The European (PAL) Spanish disc has Spanish movies and speech, and starts in Spanish; another language there keeps them in Spanish.";
+#endif
         // The game folder can't be reached on iPhone and iPad, and the
         // installed files decide what a language gives (the note under the
         // row): the row isn't shown there.
@@ -543,8 +552,8 @@ namespace settings
               .env = "NFSMW_UPDATE_CHECK", .defaultValue = 1 },
             // Game
             { .id = Id::GameLanguage, .category = Category::Game, .type = Type::Enum, .apply = Apply::Restart, .hidden = kLanguageHidden,
-              .table = "game", .key = "language", .label = "Language",
-              .description = "The language of the game's menus and race text: English (the USA disc's), or French, German, Italian, Spanish, Dutch, Swedish, Danish, Polish or Finnish, from the same disc's files. The movies and the speech stay in English, as the disc has them. The European (PAL) Spanish disc has Spanish movies and speech, and starts in Spanish; another language there keeps them in Spanish.",
+              .table = "game", .key = "language", .label = kLanguageLabel,
+              .description = kLanguageDescription,
               .env = "NFSMW_LANGUAGE", .defaultValue = double(game::language::kEnglish), .entries = kLanguageEntries },
         };
         static_assert(std::size(kOptions) == kCount, "one row per settings::Id");
@@ -1352,7 +1361,11 @@ namespace settings
         case Category::Input: return "Input";
         case Category::Controls: return "Controls";
         case Category::Wheel: return "Wheel";
+#ifdef __PROSPERO__
+        case Category::Game: return "Language";  // Text, and the disc's Audio
+#else
         case Category::Game: return "Game";
+#endif
         case Category::Advanced: return "Advanced";
         default: return "";
         }

@@ -4,9 +4,9 @@
 // generated from a verified dump by scripts/gen_install_manifest.py, one per
 // supported release (region): manifest.inc (USA), manifest_pal_es.inc
 // (Europe, the PAL disc with Spanish speech and movies) and manifest_pal_de.inc
-// (Europe, the German PAL disc; compiled in only by a build that links its
-// code, SB_PAL_DE: a build without it refuses that disc up front,
-// ReleaseWithoutCode). Each region's code is
+// (Europe, German PAL), manifest_pal_en.inc (Europe, English PAL). A PAL
+// manifest is available only when its code is linked (SB_PAL_ES/DE/EN);
+// other known discs are refused up front (ReleaseWithoutCode). Each region's code is
 // recompiled from that one default.xex, so its hash doubles as the
 // supported-version check and says which region a disc or install is (the
 // title ID is the same in all).
@@ -49,13 +49,13 @@ namespace install
     // files; they all take a Manifest so tests can pass a small one instead.
     const Manifest& GameManifest();
 
-    // Every compiled-in manifest, USA first. Their default.xex hashes, sizes
+    // Every compiled-in manifest, USA first. Their default.xex hashes
     // and versions all differ (static_asserts in manifest.cpp).
     std::span<const Manifest* const> GameManifests();
     bool IsGameManifest(const Manifest& manifest);  // one of GameManifests()
 
     // The compiled-in manifest with that default.xex SHA-256 (lower-case hex),
-    // default.xex size, or version; nullptr if none.
+    // default.xex size, or version; nullptr if none (or a size is ambiguous).
     const Manifest* ManifestForXexHash(std::string_view sha256);
     const Manifest* ManifestForXexSize(uint64_t size);
     const Manifest* ManifestForVersion(std::string_view version);

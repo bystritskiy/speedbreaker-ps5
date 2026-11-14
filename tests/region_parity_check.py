@@ -58,6 +58,10 @@ SKIP = 77  # ctest's SKIP_RETURN_CODE (tests/CMakeLists.txt)
 #   'midasm_hook' a region-only [[midasm_hook]], key = its name;
 #   'wiring'      a WIRING line the region doesn't need, key = the file.
 ALLOWED = {
+    ('pal-en', 'function', (0x823AF040, 0xE0)): 'English PAL date format strings by language',
+    ('pal-en', 'function', (0x823AF120, 0xE0)): 'English PAL number format strings by language',
+    ('pal-en', 'switch', 0x823AF068): 'the jump table of the English PAL date format leaf',
+    ('pal-en', 'switch', 0x823AF148): 'the jump table of the English PAL number format leaf',
     # The PAL build's two extra leaf functions (no .pdata), between the USA's
     # 0x823AEEC0 and 0x823AF130: the date and number formats' per-language
     # strings, called by the functions the PAL build changed
