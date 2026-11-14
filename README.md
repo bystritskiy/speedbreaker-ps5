@@ -73,6 +73,8 @@ even its PlayStation button text is made at run time from your disc's own text.
   screen, the DualSense you last pressed is player 1.
 - **Cops in Quick Race.** A Cops row in Custom Race's race options (Off by default) puts the police
   in Circuit, Sprint, Lap Knockout and Speedtrap races, in single player.
+- **USA, European English and Spanish discs,** each with its own movies and speech, and the
+  menus and race text in any of the game's ten languages (Settings > Language).
 - **PlayStation wording.** The menus say PS Button, Options and the PS5's names instead of the
   Xbox ones, in all ten languages.
 - **The original look:** sunlit roads and shadows as on the console, the game's own display tone,
@@ -97,6 +99,10 @@ even its PlayStation button text is made at run time from your disc's own text.
   <tr>
     <td width="50%"><img src="assets/screenshots/ps5/ps5-08-settings-graphics-4k.jpg" alt="The SpeedBreaker settings menu over the paused game, Graphics page, Internal Resolution 3x (3840x2160)"><br><sub>The settings menu: Graphics, at 3840x2160.</sub></td>
     <td width="50%"><img src="assets/screenshots/ps5/ps5-09-settings-display.jpg" alt="The SpeedBreaker settings menu over the paused game, Display page, Frame Rate 60 fps"><br><sub>The settings menu: Display.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/ps5/ps5-10-settings-language.jpg" alt="The SpeedBreaker settings menu, Language page, Text English and Audio Spanish on the Spanish disc"><br><sub>The settings menu: Language, English text on the Spanish disc.</sub></td>
+    <td width="50%"></td>
   </tr>
 </table>
 
@@ -177,8 +183,8 @@ pages, and Circle closes the menu. Every change applies at once and is saved whe
 - **Graphics:** Anti-Aliasing, Upscaling, Sharpening, Anisotropic Filtering (Auto: 4x),
   Internal Resolution (3x, 3840x2160, on the PS5), Shadow Resolution, Sharper UI and Movie
   Upscaling.
-- **Audio, Input** (deadzones, Vibration), **Game** (Language: one of ten, from the disc's own
-  text) and **Advanced** (Asynchronous Shaders, Performance Overlay, **Save Bug Report**).
+- **Audio, Input** (deadzones, Vibration), **Language** (Text: one of ten, from the disc's own
+  files, on any disc; Audio: the disc's speech and movies) and **Advanced** (Asynchronous Shaders, Performance Overlay, **Save Bug Report**).
 
 There is no Check for Updates on the PS5: the app never goes online.
 [SpeedBreaker's README](https://github.com/SpeedBreakerProject/speedbreaker#settings) describes
